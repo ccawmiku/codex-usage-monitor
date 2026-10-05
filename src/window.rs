@@ -25,6 +25,12 @@ use crate::native_interop::{
     WM_APP_USAGE_UPDATED,
 };
 use crate::poller;
+use crate::render::{
+    self, apply_capsule_and_alpha, parse_display_parts, rasterize_concentric_ring,
+    resolve_model_colors, tint_bg, ModelKind, CAPSULE_LEFT_PADDING, CAPSULE_RADIUS,
+    CAPSULE_RIGHT_PADDING, DRAG_HANDLE_HEIGHT, DRAG_HANDLE_WIDTH, MODEL_BLOCK_WIDTH,
+    MODEL_DIVIDER_WIDTH, WIDGET_HEIGHT,
+};
 use crate::theme;
 use crate::tray_icon;
 use crate::updater::{self, InstallChannel, ReleaseDescriptor, UpdateCheckResult};
@@ -1434,15 +1440,6 @@ fn set_startup_enabled(enable: bool) {
     }
 }
 
-const CAPSULE_RADIUS: i32 = 12;
-const DRAG_HANDLE_WIDTH: i32 = 2;
-const DRAG_HANDLE_HEIGHT: i32 = 14;
-const MODEL_BLOCK_WIDTH: i32 = 106;
-const MODEL_DIVIDER_WIDTH: i32 = 17;
-const CAPSULE_LEFT_PADDING: i32 = 20;
-const CAPSULE_RIGHT_PADDING: i32 = 14;
-const WIDGET_HEIGHT: i32 = 36;
-
 fn is_drag_handle_point(client_x: i32, _client_y: i32) -> bool {
     client_x >= 0 && client_x < sc(CAPSULE_LEFT_PADDING)
 }
@@ -1766,223 +1763,7 @@ pub fn run() {
     }
 }
 
-/// Render widget content and push to the layered window via UpdateLayeredWindow.
-/// Renders fully opaque with the actual taskbar background colour so that
-/// ClearType sub-pixel font rendering can be used for crisp, OS-native text.
-#[derive(Copy, Clone, PartialEq, Eq)]
-enum ModelKind {
-    Codex,
-    Antigravity,
-    ClaudeCode,
-}
 
-fn rasterize_concentric_ring(
-    buffer: &mut [u32],
-    buf_w: i32,
-    buf_h: i32,
-    cx: f32,
-    cy: f32,
-    p5h: f32,
-    p7d: f32,
-    kind: ModelKind,
-    c5h_rgb: (u8, u8, u8),
-    c7d_rgb: (u8, u8, u8),
-    is_dark: bool,
-    dpi_scale: f32,
-) {
-    let r1 = 11.5 * dpi_scale;
-    let w1 = 2.2 * dpi_scale;
-    let r2 = 8.0 * dpi_scale;
-    let w2 = 1.8 * dpi_scale;
-
-    let track_rgb = if is_dark { (255u8, 255u8, 255u8) } else { (0u8, 0u8, 0u8) };
-    let track_alpha = if is_dark { 0.12f32 } else { 0.08f32 };
-    let logo_rgb = if is_dark { (241u8, 245u8, 249u8) } else { (30u8, 41u8, 59u8) };
-
-    let sw5h = std::f32::consts::TAU * (p5h.clamp(0.0, 100.0) / 100.0);
-    let sw7d = std::f32::consts::TAU * (p7d.clamp(0.0, 100.0) / 100.0);
-
-    let box_r = (14.5 * dpi_scale).ceil() as i32;
-    let min_x = ((cx - box_r as f32).floor() as i32).max(0);
-    let max_x = ((cx + box_r as f32).ceil() as i32).min(buf_w - 1);
-    let min_y = ((cy - box_r as f32).floor() as i32).max(0);
-    let max_y = ((cy + box_r as f32).ceil() as i32).min(buf_h - 1);
-
-    for py in min_y..=max_y {
-        for px in min_x..=max_x {
-            let dx = (px as f32 + 0.5) - cx;
-            let dy = (py as f32 + 0.5) - cy;
-            let r = (dx * dx + dy * dy).sqrt();
-            if r > 15.0 * dpi_scale {
-                continue;
-            }
-
-            let angle = dy.atan2(dx);
-            let mut th = angle + std::f32::consts::FRAC_PI_2;
-            if th < 0.0 {
-                th += std::f32::consts::TAU;
-            }
-
-            // Track 5h
-            let d1_t = (r - r1).abs();
-            let a1_t = (0.5 - (d1_t - w1 * 0.5)).clamp(0.0, 1.0);
-
-            // Arc 5h
-            let d_s = (dx * dx + (dy + r1) * (dy + r1)).sqrt();
-            let ex = r1 * sw5h.sin();
-            let ey = -r1 * sw5h.cos();
-            let d_e = ((dx - ex) * (dx - ex) + (dy - ey) * (dy - ey)).sqrt();
-            let mut d_arc5h = d_s.min(d_e);
-            if p5h > 0.0 && th <= sw5h {
-                d_arc5h = d_arc5h.min(d1_t);
-            }
-            let a1_arc = if p5h > 0.0 {
-                (0.5 - (d_arc5h - w1 * 0.5)).clamp(0.0, 1.0)
-            } else {
-                0.0
-            };
-
-            // Track 7d
-            let d2_t = (r - r2).abs();
-            let a2_t = (0.5 - (d2_t - w2 * 0.5)).clamp(0.0, 1.0);
-
-            // Arc 7d
-            let d_s2 = (dx * dx + (dy + r2) * (dy + r2)).sqrt();
-            let ex2 = r2 * sw7d.sin();
-            let ey2 = -r2 * sw7d.cos();
-            let d_e2 = ((dx - ex2) * (dx - ex2) + (dy - ey2) * (dy - ey2)).sqrt();
-            let mut d_arc7d = d_s2.min(d_e2);
-            if p7d > 0.0 && th <= sw7d {
-                d_arc7d = d_arc7d.min(d2_t);
-            }
-            let a2_arc = if p7d > 0.0 {
-                (0.5 - (d_arc7d - w2 * 0.5)).clamp(0.0, 1.0)
-            } else {
-                0.0
-            };
-
-            // Center Logo
-            let mut a_logo = 0.0f32;
-            match kind {
-                ModelKind::Antigravity => {
-                    let rg_out = 5.2 * dpi_scale;
-                    let rg_in = 3.0 * dpi_scale;
-                    if r >= rg_in - 0.5 && r <= rg_out + 0.5 {
-                        if !(angle > -0.4 && angle < 0.1 && dx > 0.0) {
-                            let mid = (rg_out + rg_in) * 0.5;
-                            let half_thick = (rg_out - rg_in) * 0.5;
-                            a_logo = (0.5 - (r - mid).abs() + half_thick).clamp(0.0, 1.0);
-                        }
-                    }
-                    if dy >= -1.1 * dpi_scale && dy <= 1.1 * dpi_scale && dx >= 0.0 && dx <= 4.8 * dpi_scale {
-                        a_logo = a_logo.max(1.0);
-                    }
-                }
-                ModelKind::Codex => {
-                    for k in 0..6 {
-                        let rot = (k as f32) * (std::f32::consts::PI / 3.0);
-                        let rx = dx * rot.cos() - dy * rot.sin();
-                        let ry = dx * rot.sin() + dy * rot.cos();
-                        if ry - 1.6 * dpi_scale >= -0.8 * dpi_scale
-                            && ry - 1.6 * dpi_scale <= 0.8 * dpi_scale
-                            && rx >= -1.0 * dpi_scale
-                            && rx <= 3.8 * dpi_scale
-                        {
-                            a_logo = a_logo.max(1.0);
-                        }
-                    }
-                }
-                ModelKind::ClaudeCode => {
-                    if r <= 2.2 * dpi_scale {
-                        a_logo = 1.0;
-                    } else {
-                        for k in 0..6 {
-                            let rot = (k as f32) * (std::f32::consts::PI / 3.0);
-                            let rx = dx * rot.cos() - dy * rot.sin();
-                            let ry = dx * rot.sin() + dy * rot.cos();
-                            if ry.abs() <= 0.7 * dpi_scale && rx >= 0.0 && rx <= 4.5 * dpi_scale {
-                                a_logo = a_logo.max(1.0);
-                            }
-                        }
-                    }
-                }
-            }
-
-            let idx = (py * buf_w + px) as usize;
-            let cur = buffer[idx];
-            let mut cur_r = ((cur >> 16) & 0xFF) as f32;
-            let mut cur_g = ((cur >> 8) & 0xFF) as f32;
-            let mut cur_b = (cur & 0xFF) as f32;
-
-            let blend = |cr: &mut f32, cg: &mut f32, cb: &mut f32, tr: u8, tg: u8, tb: u8, a: f32| {
-                if a > 0.001 {
-                    let inv = 1.0 - a;
-                    *cr = (tr as f32) * a + *cr * inv;
-                    *cg = (tg as f32) * a + *cg * inv;
-                    *cb = (tb as f32) * a + *cb * inv;
-                }
-            };
-
-            if a1_t > 0.0 { blend(&mut cur_r, &mut cur_g, &mut cur_b, track_rgb.0, track_rgb.1, track_rgb.2, a1_t * track_alpha); }
-            if a1_arc > 0.0 { blend(&mut cur_r, &mut cur_g, &mut cur_b, c5h_rgb.0, c5h_rgb.1, c5h_rgb.2, a1_arc); }
-            if a2_t > 0.0 { blend(&mut cur_r, &mut cur_g, &mut cur_b, track_rgb.0, track_rgb.1, track_rgb.2, a2_t * track_alpha); }
-            if a2_arc > 0.0 { blend(&mut cur_r, &mut cur_g, &mut cur_b, c7d_rgb.0, c7d_rgb.1, c7d_rgb.2, a2_arc); }
-            if a_logo > 0.0 { blend(&mut cur_r, &mut cur_g, &mut cur_b, logo_rgb.0, logo_rgb.1, logo_rgb.2, a_logo * 0.90); }
-
-            let out_r = (cur_r.round() as u32).min(255);
-            let out_g = (cur_g.round() as u32).min(255);
-            let out_b = (cur_b.round() as u32).min(255);
-            buffer[idx] = 0xFF000000 | (out_r << 16) | (out_g << 8) | out_b;
-        }
-    }
-}
-
-fn parse_display_parts(text: &str) -> (String, String) {
-    if let Some((p, t)) = text.split_once('\u{00b7}') {
-        let p_trimmed = p.trim().trim_start_matches("余 ").trim_start_matches("剩 ").trim();
-        (p_trimmed.to_string(), t.trim().to_string())
-    } else if let Some((p, t)) = text.split_once(' ') {
-        (p.trim().to_string(), t.trim().to_string())
-    } else {
-        (text.trim().to_string(), String::new())
-    }
-}
-
-fn tint_bg(bg: (u8, u8, u8), accent: (u8, u8, u8), factor: f32) -> COLORREF {
-    let r = ((bg.0 as f32) * (1.0 - factor) + (accent.0 as f32) * factor).round() as u32;
-    let g = ((bg.1 as f32) * (1.0 - factor) + (accent.1 as f32) * factor).round() as u32;
-    let b = ((bg.2 as f32) * (1.0 - factor) + (accent.2 as f32) * factor).round() as u32;
-    COLORREF(native_interop::colorref(r as u8, g as u8, b as u8))
-}
-
-fn resolve_model_colors(
-    kind: ModelKind,
-    p5h: f64,
-    p7d: f64,
-) -> ((u8, u8, u8), (u8, u8, u8)) {
-    let c5h_normal = match kind {
-        ModelKind::Codex => (16u8, 185u8, 129u8),
-        ModelKind::Antigravity => (59u8, 130u8, 246u8),
-        ModelKind::ClaudeCode => (217u8, 119u8, 87u8),
-    };
-    let c7d_normal = (245u8, 158u8, 11u8); // Amber for both Codex and Antigravity 7d!
-
-    let red_warning = (239u8, 68u8, 68u8);
-
-    let c5h = if p5h > 0.0 && poller::remaining_percentage(p5h) <= 20.0 {
-        red_warning
-    } else {
-        c5h_normal
-    };
-
-    let c7d = if p7d > 0.0 && poller::remaining_percentage(p7d) <= 20.0 {
-        red_warning
-    } else {
-        c7d_normal
-    };
-
-    (c5h, c7d)
-}
 
 fn render_layered() {
     refresh_dpi();
@@ -2110,65 +1891,8 @@ fn render_layered() {
             Some(pixel_data),
         );
 
-        let cap_bg_colorref = if is_dark {
-            native_interop::colorref(30, 30, 34)
-        } else {
-            native_interop::colorref(251, 250, 250)
-        };
-        let cap_r = (cap_bg_colorref & 0xFF) as u32;
-        let cap_g = ((cap_bg_colorref >> 8) & 0xFF) as u32;
-        let cap_b = ((cap_bg_colorref >> 16) & 0xFF) as u32;
-        let cap_dib_rgb = (cap_r << 16) | (cap_g << 8) | cap_b;
-
-        let alpha_capsule = 220u32;
-        let premul_r = (cap_r * alpha_capsule + 127) / 255;
-        let premul_g = (cap_g * alpha_capsule + 127) / 255;
-        let premul_b = (cap_b * alpha_capsule + 127) / 255;
-        let frosted_pixel = (alpha_capsule << 24) | (premul_r << 16) | (premul_g << 8) | premul_b;
-
         let corner_r = sc(CAPSULE_RADIUS);
-        let w_i = width;
-        let h_i = height;
-
-        for y in 0..h_i {
-            for x in 0..w_i {
-                let idx = (y * w_i + x) as usize;
-                let px = &mut pixel_data[idx];
-
-                let in_capsule = {
-                    let mut inside = true;
-                    if x < corner_r && y < corner_r {
-                        let dx = corner_r - x - 1;
-                        let dy = corner_r - y - 1;
-                        if dx * dx + dy * dy > corner_r * corner_r { inside = false; }
-                    } else if x >= w_i - corner_r && y < corner_r {
-                        let dx = x - (w_i - corner_r);
-                        let dy = corner_r - y - 1;
-                        if dx * dx + dy * dy > corner_r * corner_r { inside = false; }
-                    } else if x < corner_r && y >= h_i - corner_r {
-                        let dx = corner_r - x - 1;
-                        let dy = y - (h_i - corner_r);
-                        if dx * dx + dy * dy > corner_r * corner_r { inside = false; }
-                    } else if x >= w_i - corner_r && y >= h_i - corner_r {
-                        let dx = x - (w_i - corner_r);
-                        let dy = y - (h_i - corner_r);
-                        if dx * dx + dy * dy > corner_r * corner_r { inside = false; }
-                    }
-                    inside
-                };
-
-                if !in_capsule {
-                    *px = 0x01000000;
-                } else {
-                    let rgb = *px & 0x00FFFFFF;
-                    if rgb == cap_dib_rgb {
-                        *px = frosted_pixel;
-                    } else if (*px >> 24) == 0 {
-                        *px = 0xFF000000 | rgb;
-                    }
-                }
-            }
-        }
+        apply_capsule_and_alpha(pixel_data, width, height, corner_r, is_dark);
 
         let pt_src = POINT { x: 0, y: 0 };
         let sz = SIZE {
@@ -2235,28 +1959,15 @@ fn paint_content(
             right: width,
             bottom: height,
         };
-        let black_brush = CreateSolidBrush(COLORREF(0));
-        FillRect(hdc, &full_rect, black_brush);
-        let _ = DeleteObject(black_brush);
-
-        let (cap_bg_rgb, border_rgb) = if is_dark {
+        let (cap_bg_rgb, _) = if is_dark {
             ((30u8, 30u8, 34u8), (60u8, 60u8, 65u8))
         } else {
             ((251u8, 250u8, 250u8), (220u8, 222u8, 228u8))
         };
         let cap_bg = COLORREF(native_interop::colorref(cap_bg_rgb.0, cap_bg_rgb.1, cap_bg_rgb.2));
-        let border_color = COLORREF(native_interop::colorref(border_rgb.0, border_rgb.1, border_rgb.2));
-
-        let corner_r = sc(CAPSULE_RADIUS);
-        let rgn = CreateRoundRectRgn(0, 0, width + 1, height + 1, corner_r * 2, corner_r * 2);
         let bg_brush = CreateSolidBrush(cap_bg);
-        let _ = FillRgn(hdc, rgn, bg_brush);
+        FillRect(hdc, &full_rect, bg_brush);
         let _ = DeleteObject(bg_brush);
-
-        let border_brush = CreateSolidBrush(border_color);
-        let _ = FrameRgn(hdc, rgn, border_brush, 1, 1);
-        let _ = DeleteObject(border_brush);
-        let _ = DeleteObject(rgn);
 
         // Drag handle
         let drag_h = sc(DRAG_HANDLE_HEIGHT);
@@ -2462,7 +2173,7 @@ fn paint_content(
                     let mut time_rect = RECT {
                         left: tx + sc(45),
                         top: row1_y + sc(1),
-                        right: tx + sc(72),
+                        right: tx + sc(78),
                         bottom: row1_y + sc(13),
                     };
                     let _ = DrawTextW(hdc, &mut time_str, &mut time_rect, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
@@ -2522,7 +2233,7 @@ fn paint_content(
                     let mut time_rect = RECT {
                         left: tx + sc(45),
                         top: row2_y + sc(1),
-                        right: tx + sc(72),
+                        right: tx + sc(78),
                         bottom: row2_y + sc(13),
                     };
                     let _ = DrawTextW(hdc, &mut time_str, &mut time_rect, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
@@ -4551,6 +4262,14 @@ mod tests {
 
         let (pct, time) = parse_display_parts("86% · 10/12");
         assert_eq!(pct, "86%");
+        assert_eq!(time, "10/12");
+
+        let (pct, time) = parse_display_parts("剩余86%  22:05重置");
+        assert_eq!(pct, "86%");
+        assert_eq!(time, "22:05");
+
+        let (pct, time) = parse_display_parts("≈56%  10/12重置");
+        assert_eq!(pct, "56%");
         assert_eq!(time, "10/12");
 
         let (pct, time) = parse_display_parts("--");
