@@ -26,7 +26,7 @@ use crate::native_interop::{
 };
 use crate::poller;
 use crate::render::{
-    self, apply_capsule_and_alpha, parse_display_parts, rasterize_concentric_ring,
+    apply_capsule_and_alpha, parse_display_parts, rasterize_concentric_ring,
     resolve_model_colors, tint_bg, ModelKind, CAPSULE_LEFT_PADDING, CAPSULE_RADIUS,
     CAPSULE_RIGHT_PADDING, DRAG_HANDLE_HEIGHT, DRAG_HANDLE_WIDTH, MODEL_BLOCK_WIDTH,
     MODEL_DIVIDER_WIDTH, WIDGET_HEIGHT,
@@ -3794,6 +3794,7 @@ fn paint(hdc: HDC, hwnd: HWND) {
         show_antigravity,
         show_session_window,
         show_weekly_window,
+        color_mode,
     ) = {
         let state = lock_state();
         match state.as_ref() {
@@ -3818,6 +3819,7 @@ fn paint(hdc: HDC, hwnd: HWND) {
                 s.show_antigravity,
                 s.show_session_window,
                 s.show_weekly_window,
+                s.color_mode,
             ),
             None => return,
         }
@@ -3860,6 +3862,7 @@ fn paint(hdc: HDC, hwnd: HWND) {
                 width,
                 height,
                 is_dark,
+                color_mode,
                 language,
                 strings,
                 session_pct,
