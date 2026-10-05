@@ -19,9 +19,9 @@ use windows::Win32::UI::WindowsAndMessaging::*;
 
 use crate::diagnose;
 use crate::localization::{self, LanguageId, Strings};
-use crate::models::{AppUsageData, BarStyle, ColorTheme, TextFormat};
+use crate::models::{AppUsageData, ColorTheme, TextFormat};
 use crate::native_interop::{
-    self, Color, TIMER_COUNTDOWN, TIMER_POLL, TIMER_RESET_POLL, TIMER_UPDATE_CHECK, WM_APP_TRAY,
+    self, TIMER_COUNTDOWN, TIMER_POLL, TIMER_RESET_POLL, TIMER_UPDATE_CHECK, WM_APP_TRAY,
     WM_APP_USAGE_UPDATED,
 };
 use crate::poller;
@@ -97,7 +97,6 @@ struct AppState {
     drag_start_offset: i32,
 
     widget_visible: bool,
-    bar_style: BarStyle,
     color_theme: ColorTheme,
     text_format: TextFormat,
 }
@@ -147,10 +146,6 @@ const IDM_ALERT_OFF: u16 = 80;
 const IDM_ALERT_10: u16 = 81;
 const IDM_ALERT_20: u16 = 82;
 const IDM_ALERT_30: u16 = 83;
-
-// Bar style
-const IDM_STYLE_SEGMENTED: u16 = 90;
-const IDM_STYLE_PILL: u16 = 91;
 
 // Color theme
 const IDM_THEME_EMERALD: u16 = 100;
@@ -366,8 +361,6 @@ struct SettingsFile {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     notified_quota_windows: Vec<String>,
     #[serde(default)]
-    bar_style: BarStyle,
-    #[serde(default)]
     color_theme: ColorTheme,
     #[serde(default)]
     text_format: TextFormat,
@@ -389,7 +382,6 @@ impl Default for SettingsFile {
             show_weekly_window: true,
             alert_threshold_percent: 0,
             notified_quota_windows: Vec::new(),
-            bar_style: BarStyle::default(),
             color_theme: ColorTheme::default(),
             text_format: TextFormat::default(),
         }
@@ -518,7 +510,6 @@ fn save_state_settings() {
             show_weekly_window: s.show_weekly_window,
             alert_threshold_percent: s.alert_threshold_percent,
             notified_quota_windows: s.notified_quota_windows.iter().cloned().collect(),
-            bar_style: s.bar_style,
             color_theme: s.color_theme,
             text_format: s.text_format,
         });
@@ -1443,32 +1434,17 @@ fn set_startup_enabled(enable: bool) {
     }
 }
 
-// Dimensions matching the aesthetic 10-block segmented style
-const SEGMENT_W: i32 = 10;
-const SEGMENT_H: i32 = 13;
-const SEGMENT_GAP: i32 = 2;
-const SEGMENT_COUNT: i32 = 10;
-const CORNER_RADIUS: i32 = 2;
+const CAPSULE_RADIUS: i32 = 12;
+const DRAG_HANDLE_WIDTH: i32 = 2;
+const DRAG_HANDLE_HEIGHT: i32 = 14;
+const MODEL_BLOCK_WIDTH: i32 = 106;
+const MODEL_DIVIDER_WIDTH: i32 = 17;
+const CAPSULE_LEFT_PADDING: i32 = 20;
+const CAPSULE_RIGHT_PADDING: i32 = 14;
+const WIDGET_HEIGHT: i32 = 36;
 
-const LEFT_DIVIDER_W: i32 = 3;
-const DIVIDER_RIGHT_MARGIN: i32 = 10;
-const LABEL_WIDTH: i32 = 18;
-const LABEL_RIGHT_MARGIN: i32 = 10;
-const BAR_RIGHT_MARGIN: i32 = 4;
-const TEXT_WIDTH: i32 = 62;
-const SIMPLIFIED_CHINESE_LABEL_WIDTH: i32 = 20;
-const SIMPLIFIED_CHINESE_TEXT_WIDTH: i32 = 126;
-const MODEL_RIGHT_MARGIN: i32 = 3;
-const RIGHT_MARGIN: i32 = 1;
-const WIDGET_HEIGHT: i32 = 46;
-
-fn is_drag_handle_point(client_x: i32, client_y: i32) -> bool {
-    let divider_h = sc(25);
-    let divider_top = (sc(WIDGET_HEIGHT) - divider_h) / 2;
-    client_x >= 0
-        && client_x < sc(LEFT_DIVIDER_W + 5)
-        && client_y >= divider_top
-        && client_y < divider_top + divider_h
+fn is_drag_handle_point(client_x: i32, _client_y: i32) -> bool {
+    client_x >= 0 && client_x < sc(CAPSULE_LEFT_PADDING)
 }
 
 fn cursor_is_on_drag_handle(hwnd: HWND) -> bool {
@@ -1485,34 +1461,6 @@ fn active_model_count(show_claude_code: bool, show_codex: bool, show_antigravity
     (show_claude_code as i32 + show_codex as i32 + show_antigravity as i32).max(1)
 }
 
-fn row_bar_segment_count(active_models: i32) -> i32 {
-    match active_models {
-        1 => SEGMENT_COUNT,
-        2 => 5,
-        _ => 4,
-    }
-}
-
-fn usage_layout_widths(language: LanguageId, text_format: TextFormat) -> (i32, i32) {
-    let label_width = if language == LanguageId::SimplifiedChinese {
-        SIMPLIFIED_CHINESE_LABEL_WIDTH
-    } else {
-        LABEL_WIDTH
-    };
-    let text_width = match text_format {
-        TextFormat::Compact => 76,
-        TextFormat::Countdown => 62,
-        TextFormat::Verbose => {
-            if language == LanguageId::SimplifiedChinese {
-                SIMPLIFIED_CHINESE_TEXT_WIDTH
-            } else {
-                TEXT_WIDTH
-            }
-        }
-    };
-    (label_width, text_width)
-}
-
 fn usage_percent_for_display(language: LanguageId, used_percentage: f64) -> f64 {
     if language == LanguageId::SimplifiedChinese {
         poller::remaining_percentage(used_percentage)
@@ -1523,22 +1471,14 @@ fn usage_percent_for_display(language: LanguageId, used_percentage: f64) -> f64 
 
 fn total_widget_width_for(
     active_models: i32,
-    language: LanguageId,
-    text_format: TextFormat,
+    _language: LanguageId,
+    _text_format: TextFormat,
 ) -> i32 {
-    let bar_segments = row_bar_segment_count(active_models);
-    let (label_width, text_width) = usage_layout_widths(language, text_format);
-    let model_width = (sc(SEGMENT_W) + sc(SEGMENT_GAP)) * bar_segments - sc(SEGMENT_GAP)
-        + sc(BAR_RIGHT_MARGIN)
-        + sc(text_width);
-
-    sc(LEFT_DIVIDER_W)
-        + sc(DIVIDER_RIGHT_MARGIN)
-        + sc(label_width)
-        + sc(LABEL_RIGHT_MARGIN)
-        + model_width * active_models
-        + sc(MODEL_RIGHT_MARGIN) * (active_models - 1)
-        + sc(RIGHT_MARGIN)
+    let models = active_models.max(1);
+    sc(CAPSULE_LEFT_PADDING)
+        + sc(MODEL_BLOCK_WIDTH) * models
+        + sc(MODEL_DIVIDER_WIDTH) * (models - 1)
+        + sc(CAPSULE_RIGHT_PADDING)
 }
 
 fn total_widget_width_for_state(state: &AppState) -> i32 {
@@ -1570,64 +1510,6 @@ fn total_widget_width() -> i32 {
     total_widget_width_for(active_models, language, text_format)
 }
 
-fn claude_accent_color() -> Color {
-    Color::from_hex("#D97757")
-}
-
-fn codex_accent_color(is_dark: bool) -> Color {
-    if is_dark {
-        Color::from_hex("#F5F5F5")
-    } else {
-        Color::from_hex("#1F1F1F")
-    }
-}
-
-fn resolve_codex_accent(theme: ColorTheme, percent: f64, is_dark: bool) -> Color {
-    match theme {
-        ColorTheme::Emerald => Color::from_hex("#10A37F"),
-        ColorTheme::Coral => Color::from_hex("#D97757"),
-        ColorTheme::Cyan => Color::from_hex("#00B4D8"),
-        ColorTheme::Dynamic => {
-            let p = percent.clamp(0.0, 100.0);
-            if p >= 40.0 {
-                Color::from_hex("#10B981")
-            } else if p >= 20.0 {
-                Color::from_hex("#F59E0B")
-            } else {
-                Color::from_hex("#EF4444")
-            }
-        }
-        ColorTheme::Monochrome => codex_accent_color(is_dark),
-    }
-}
-
-fn antigravity_accent_color() -> Color {
-    Color::from_hex("#4285F4")
-}
-
-fn claude_usage_text_color(is_dark: bool) -> Color {
-    if is_dark {
-        Color::from_hex("#F09A7A")
-    } else {
-        Color::from_hex("#A94F32")
-    }
-}
-
-fn codex_usage_text_color(is_dark: bool) -> Color {
-    if is_dark {
-        Color::from_hex("#F5F5F5")
-    } else {
-        Color::from_hex("#1F1F1F")
-    }
-}
-
-fn antigravity_usage_text_color(is_dark: bool) -> Color {
-    if is_dark {
-        Color::from_hex("#8AB4F8")
-    } else {
-        Color::from_hex("#1967D2")
-    }
-}
 
 pub fn run() {
     // Enable Per-Monitor DPI Awareness V2 for crisp rendering at any scale factor
@@ -1799,7 +1681,6 @@ pub fn run() {
                 drag_start_client_x: 0,
                 drag_start_offset: 0,
                 widget_visible: settings.widget_visible,
-                bar_style: settings.bar_style,
                 color_theme: settings.color_theme,
                 text_format: settings.text_format,
             });
@@ -1888,6 +1769,221 @@ pub fn run() {
 /// Render widget content and push to the layered window via UpdateLayeredWindow.
 /// Renders fully opaque with the actual taskbar background colour so that
 /// ClearType sub-pixel font rendering can be used for crisp, OS-native text.
+#[derive(Copy, Clone, PartialEq, Eq)]
+enum ModelKind {
+    Codex,
+    Antigravity,
+    ClaudeCode,
+}
+
+fn rasterize_concentric_ring(
+    buffer: &mut [u32],
+    buf_w: i32,
+    buf_h: i32,
+    cx: f32,
+    cy: f32,
+    p5h: f32,
+    p7d: f32,
+    kind: ModelKind,
+    c5h_rgb: (u8, u8, u8),
+    c7d_rgb: (u8, u8, u8),
+    is_dark: bool,
+    dpi_scale: f32,
+) {
+    let r1 = 11.5 * dpi_scale;
+    let w1 = 2.2 * dpi_scale;
+    let r2 = 8.0 * dpi_scale;
+    let w2 = 1.8 * dpi_scale;
+
+    let track_rgb = if is_dark { (255u8, 255u8, 255u8) } else { (0u8, 0u8, 0u8) };
+    let track_alpha = if is_dark { 0.12f32 } else { 0.08f32 };
+    let logo_rgb = if is_dark { (241u8, 245u8, 249u8) } else { (30u8, 41u8, 59u8) };
+
+    let sw5h = std::f32::consts::TAU * (p5h.clamp(0.0, 100.0) / 100.0);
+    let sw7d = std::f32::consts::TAU * (p7d.clamp(0.0, 100.0) / 100.0);
+
+    let box_r = (14.5 * dpi_scale).ceil() as i32;
+    let min_x = ((cx - box_r as f32).floor() as i32).max(0);
+    let max_x = ((cx + box_r as f32).ceil() as i32).min(buf_w - 1);
+    let min_y = ((cy - box_r as f32).floor() as i32).max(0);
+    let max_y = ((cy + box_r as f32).ceil() as i32).min(buf_h - 1);
+
+    for py in min_y..=max_y {
+        for px in min_x..=max_x {
+            let dx = (px as f32 + 0.5) - cx;
+            let dy = (py as f32 + 0.5) - cy;
+            let r = (dx * dx + dy * dy).sqrt();
+            if r > 15.0 * dpi_scale {
+                continue;
+            }
+
+            let angle = dy.atan2(dx);
+            let mut th = angle + std::f32::consts::FRAC_PI_2;
+            if th < 0.0 {
+                th += std::f32::consts::TAU;
+            }
+
+            // Track 5h
+            let d1_t = (r - r1).abs();
+            let a1_t = (0.5 - (d1_t - w1 * 0.5)).clamp(0.0, 1.0);
+
+            // Arc 5h
+            let d_s = (dx * dx + (dy + r1) * (dy + r1)).sqrt();
+            let ex = r1 * sw5h.sin();
+            let ey = -r1 * sw5h.cos();
+            let d_e = ((dx - ex) * (dx - ex) + (dy - ey) * (dy - ey)).sqrt();
+            let mut d_arc5h = d_s.min(d_e);
+            if p5h > 0.0 && th <= sw5h {
+                d_arc5h = d_arc5h.min(d1_t);
+            }
+            let a1_arc = if p5h > 0.0 {
+                (0.5 - (d_arc5h - w1 * 0.5)).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+
+            // Track 7d
+            let d2_t = (r - r2).abs();
+            let a2_t = (0.5 - (d2_t - w2 * 0.5)).clamp(0.0, 1.0);
+
+            // Arc 7d
+            let d_s2 = (dx * dx + (dy + r2) * (dy + r2)).sqrt();
+            let ex2 = r2 * sw7d.sin();
+            let ey2 = -r2 * sw7d.cos();
+            let d_e2 = ((dx - ex2) * (dx - ex2) + (dy - ey2) * (dy - ey2)).sqrt();
+            let mut d_arc7d = d_s2.min(d_e2);
+            if p7d > 0.0 && th <= sw7d {
+                d_arc7d = d_arc7d.min(d2_t);
+            }
+            let a2_arc = if p7d > 0.0 {
+                (0.5 - (d_arc7d - w2 * 0.5)).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+
+            // Center Logo
+            let mut a_logo = 0.0f32;
+            match kind {
+                ModelKind::Antigravity => {
+                    let rg_out = 5.2 * dpi_scale;
+                    let rg_in = 3.0 * dpi_scale;
+                    if r >= rg_in - 0.5 && r <= rg_out + 0.5 {
+                        if !(angle > -0.4 && angle < 0.1 && dx > 0.0) {
+                            let mid = (rg_out + rg_in) * 0.5;
+                            let half_thick = (rg_out - rg_in) * 0.5;
+                            a_logo = (0.5 - (r - mid).abs() + half_thick).clamp(0.0, 1.0);
+                        }
+                    }
+                    if dy >= -1.1 * dpi_scale && dy <= 1.1 * dpi_scale && dx >= 0.0 && dx <= 4.8 * dpi_scale {
+                        a_logo = a_logo.max(1.0);
+                    }
+                }
+                ModelKind::Codex => {
+                    for k in 0..6 {
+                        let rot = (k as f32) * (std::f32::consts::PI / 3.0);
+                        let rx = dx * rot.cos() - dy * rot.sin();
+                        let ry = dx * rot.sin() + dy * rot.cos();
+                        if ry - 1.6 * dpi_scale >= -0.8 * dpi_scale
+                            && ry - 1.6 * dpi_scale <= 0.8 * dpi_scale
+                            && rx >= -1.0 * dpi_scale
+                            && rx <= 3.8 * dpi_scale
+                        {
+                            a_logo = a_logo.max(1.0);
+                        }
+                    }
+                }
+                ModelKind::ClaudeCode => {
+                    if r <= 2.2 * dpi_scale {
+                        a_logo = 1.0;
+                    } else {
+                        for k in 0..6 {
+                            let rot = (k as f32) * (std::f32::consts::PI / 3.0);
+                            let rx = dx * rot.cos() - dy * rot.sin();
+                            let ry = dx * rot.sin() + dy * rot.cos();
+                            if ry.abs() <= 0.7 * dpi_scale && rx >= 0.0 && rx <= 4.5 * dpi_scale {
+                                a_logo = a_logo.max(1.0);
+                            }
+                        }
+                    }
+                }
+            }
+
+            let idx = (py * buf_w + px) as usize;
+            let cur = buffer[idx];
+            let mut cur_r = ((cur >> 16) & 0xFF) as f32;
+            let mut cur_g = ((cur >> 8) & 0xFF) as f32;
+            let mut cur_b = (cur & 0xFF) as f32;
+
+            let blend = |cr: &mut f32, cg: &mut f32, cb: &mut f32, tr: u8, tg: u8, tb: u8, a: f32| {
+                if a > 0.001 {
+                    let inv = 1.0 - a;
+                    *cr = (tr as f32) * a + *cr * inv;
+                    *cg = (tg as f32) * a + *cg * inv;
+                    *cb = (tb as f32) * a + *cb * inv;
+                }
+            };
+
+            if a1_t > 0.0 { blend(&mut cur_r, &mut cur_g, &mut cur_b, track_rgb.0, track_rgb.1, track_rgb.2, a1_t * track_alpha); }
+            if a1_arc > 0.0 { blend(&mut cur_r, &mut cur_g, &mut cur_b, c5h_rgb.0, c5h_rgb.1, c5h_rgb.2, a1_arc); }
+            if a2_t > 0.0 { blend(&mut cur_r, &mut cur_g, &mut cur_b, track_rgb.0, track_rgb.1, track_rgb.2, a2_t * track_alpha); }
+            if a2_arc > 0.0 { blend(&mut cur_r, &mut cur_g, &mut cur_b, c7d_rgb.0, c7d_rgb.1, c7d_rgb.2, a2_arc); }
+            if a_logo > 0.0 { blend(&mut cur_r, &mut cur_g, &mut cur_b, logo_rgb.0, logo_rgb.1, logo_rgb.2, a_logo * 0.90); }
+
+            let out_r = (cur_r.round() as u32).min(255);
+            let out_g = (cur_g.round() as u32).min(255);
+            let out_b = (cur_b.round() as u32).min(255);
+            buffer[idx] = 0xFF000000 | (out_r << 16) | (out_g << 8) | out_b;
+        }
+    }
+}
+
+fn parse_display_parts(text: &str) -> (String, String) {
+    if let Some((p, t)) = text.split_once('\u{00b7}') {
+        let p_trimmed = p.trim().trim_start_matches("余 ").trim_start_matches("剩 ").trim();
+        (p_trimmed.to_string(), t.trim().to_string())
+    } else if let Some((p, t)) = text.split_once(' ') {
+        (p.trim().to_string(), t.trim().to_string())
+    } else {
+        (text.trim().to_string(), String::new())
+    }
+}
+
+fn tint_bg(bg: (u8, u8, u8), accent: (u8, u8, u8), factor: f32) -> COLORREF {
+    let r = ((bg.0 as f32) * (1.0 - factor) + (accent.0 as f32) * factor).round() as u32;
+    let g = ((bg.1 as f32) * (1.0 - factor) + (accent.1 as f32) * factor).round() as u32;
+    let b = ((bg.2 as f32) * (1.0 - factor) + (accent.2 as f32) * factor).round() as u32;
+    COLORREF(native_interop::colorref(r as u8, g as u8, b as u8))
+}
+
+fn resolve_model_colors(
+    kind: ModelKind,
+    p5h: f64,
+    p7d: f64,
+) -> ((u8, u8, u8), (u8, u8, u8)) {
+    let c5h_normal = match kind {
+        ModelKind::Codex => (16u8, 185u8, 129u8),
+        ModelKind::Antigravity => (59u8, 130u8, 246u8),
+        ModelKind::ClaudeCode => (217u8, 119u8, 87u8),
+    };
+    let c7d_normal = (245u8, 158u8, 11u8); // Amber for both Codex and Antigravity 7d!
+
+    let red_warning = (239u8, 68u8, 68u8);
+
+    let c5h = if p5h > 0.0 && poller::remaining_percentage(p5h) <= 20.0 {
+        red_warning
+    } else {
+        c5h_normal
+    };
+
+    let c7d = if p7d > 0.0 && poller::remaining_percentage(p7d) <= 20.0 {
+        red_warning
+    } else {
+        c7d_normal
+    };
+
+    (c5h, c7d)
+}
+
 fn render_layered() {
     refresh_dpi();
     let (
@@ -1913,9 +2009,6 @@ fn render_layered() {
         show_antigravity,
         show_session_window,
         show_weekly_window,
-        bar_style,
-        color_theme,
-        text_format,
     ) = {
         let state = lock_state();
         match state.as_ref() {
@@ -1942,9 +2035,6 @@ fn render_layered() {
                 s.show_antigravity,
                 s.show_session_window,
                 s.show_weekly_window,
-                s.bar_style,
-                s.color_theme,
-                s.text_format,
             ),
             None => return,
         }
@@ -1952,7 +2042,6 @@ fn render_layered() {
 
     let hwnd = hwnd_val.to_hwnd();
 
-    // For non-embedded fallback, just invalidate and let WM_PAINT handle it
     if !embedded {
         unsafe {
             let _ = InvalidateRect(hwnd, None, false);
@@ -1962,24 +2051,6 @@ fn render_layered() {
 
     let width = total_widget_width();
     let height = sc(WIDGET_HEIGHT);
-
-    let accent = claude_accent_color();
-    let antigravity_accent = antigravity_accent_color();
-    let track = if is_dark {
-        Color::from_hex("#444444")
-    } else {
-        Color::from_hex("#AAAAAA")
-    };
-    let text_color = if is_dark {
-        Color::from_hex("#888888")
-    } else {
-        Color::from_hex("#404040")
-    };
-    let bg_color = if is_dark {
-        Color::from_hex("#1C1C1C")
-    } else {
-        Color::from_hex("#F3F3F3")
-    };
 
     unsafe {
         let screen_dc = GetDC(hwnd);
@@ -2010,19 +2081,13 @@ fn render_layered() {
 
         let old_bmp = SelectObject(mem_dc, dib);
         let pixel_count = (width * height) as usize;
+        let pixel_data = std::slice::from_raw_parts_mut(bits as *mut u32, pixel_count);
 
-        // Render once with the actual taskbar background colour.
-        // Using an opaque background lets us use CLEARTYPE_QUALITY for
-        // sub-pixel font rendering that matches the rest of the OS.
         paint_content(
             mem_dc,
             width,
             height,
             is_dark,
-            &bg_color,
-            &text_color,
-            &accent,
-            &track,
             language,
             strings,
             session_pct,
@@ -2042,26 +2107,69 @@ fn render_layered() {
             show_antigravity,
             show_session_window,
             show_weekly_window,
-            &antigravity_accent,
-            bar_style,
-            color_theme,
-            text_format,
+            Some(pixel_data),
         );
 
-        // Background pixels → alpha 1 (nearly invisible but still hittable for right-click).
-        // Content pixels → fully opaque (preserves ClearType sub-pixel rendering).
-        let bg_bgr = bg_color.to_colorref();
-        let pixel_data = std::slice::from_raw_parts_mut(bits as *mut u32, pixel_count);
-        for px in pixel_data.iter_mut() {
-            let rgb = *px & 0x00FFFFFF;
-            if rgb == bg_bgr {
-                *px = 0x01000000;
-            } else {
-                *px = rgb | 0xFF000000;
+        let cap_bg_colorref = if is_dark {
+            native_interop::colorref(30, 30, 34)
+        } else {
+            native_interop::colorref(251, 250, 250)
+        };
+        let cap_r = (cap_bg_colorref & 0xFF) as u32;
+        let cap_g = ((cap_bg_colorref >> 8) & 0xFF) as u32;
+        let cap_b = ((cap_bg_colorref >> 16) & 0xFF) as u32;
+        let cap_dib_rgb = (cap_r << 16) | (cap_g << 8) | cap_b;
+
+        let alpha_capsule = 220u32;
+        let premul_r = (cap_r * alpha_capsule + 127) / 255;
+        let premul_g = (cap_g * alpha_capsule + 127) / 255;
+        let premul_b = (cap_b * alpha_capsule + 127) / 255;
+        let frosted_pixel = (alpha_capsule << 24) | (premul_r << 16) | (premul_g << 8) | premul_b;
+
+        let corner_r = sc(CAPSULE_RADIUS);
+        let w_i = width;
+        let h_i = height;
+
+        for y in 0..h_i {
+            for x in 0..w_i {
+                let idx = (y * w_i + x) as usize;
+                let px = &mut pixel_data[idx];
+
+                let in_capsule = {
+                    let mut inside = true;
+                    if x < corner_r && y < corner_r {
+                        let dx = corner_r - x - 1;
+                        let dy = corner_r - y - 1;
+                        if dx * dx + dy * dy > corner_r * corner_r { inside = false; }
+                    } else if x >= w_i - corner_r && y < corner_r {
+                        let dx = x - (w_i - corner_r);
+                        let dy = corner_r - y - 1;
+                        if dx * dx + dy * dy > corner_r * corner_r { inside = false; }
+                    } else if x < corner_r && y >= h_i - corner_r {
+                        let dx = corner_r - x - 1;
+                        let dy = y - (h_i - corner_r);
+                        if dx * dx + dy * dy > corner_r * corner_r { inside = false; }
+                    } else if x >= w_i - corner_r && y >= h_i - corner_r {
+                        let dx = x - (w_i - corner_r);
+                        let dy = y - (h_i - corner_r);
+                        if dx * dx + dy * dy > corner_r * corner_r { inside = false; }
+                    }
+                    inside
+                };
+
+                if !in_capsule {
+                    *px = 0x01000000;
+                } else {
+                    let rgb = *px & 0x00FFFFFF;
+                    if rgb == cap_dib_rgb {
+                        *px = frosted_pixel;
+                    } else if (*px >> 24) == 0 {
+                        *px = 0xFF000000 | rgb;
+                    }
+                }
             }
         }
 
-        // Push to window via UpdateLayeredWindow
         let pt_src = POINT { x: 0, y: 0 };
         let sz = SIZE {
             cx: width,
@@ -2086,7 +2194,6 @@ fn render_layered() {
             ULW_ALPHA,
         );
 
-        // Cleanup
         SelectObject(mem_dc, old_bmp);
         let _ = DeleteObject(dib);
         let _ = DeleteDC(mem_dc);
@@ -2100,12 +2207,8 @@ fn paint_content(
     width: i32,
     height: i32,
     is_dark: bool,
-    bg: &Color,
-    text_color: &Color,
-    accent: &Color,
-    track: &Color,
     language: LanguageId,
-    strings: Strings,
+    _strings: Strings,
     session_pct: f64,
     session_text: &str,
     weekly_pct: f64,
@@ -2123,89 +2226,59 @@ fn paint_content(
     show_antigravity: bool,
     show_session_window: bool,
     show_weekly_window: bool,
-    antigravity_accent: &Color,
-    bar_style: BarStyle,
-    color_theme: ColorTheme,
-    text_format: TextFormat,
+    mut pixel_buffer: Option<&mut [u32]>,
 ) {
     unsafe {
-        let session_pct = usage_percent_for_display(language, session_pct);
-        let weekly_pct = usage_percent_for_display(language, weekly_pct);
-        let codex_session_pct = usage_percent_for_display(language, codex_session_pct);
-        let codex_weekly_pct = usage_percent_for_display(language, codex_weekly_pct);
-        let antigravity_session_pct = usage_percent_for_display(language, antigravity_session_pct);
-        let antigravity_weekly_pct = usage_percent_for_display(language, antigravity_weekly_pct);
-        let (label_width, text_width) = usage_layout_widths(language, text_format);
-
-        let codex_session_accent = resolve_codex_accent(color_theme, codex_session_pct, is_dark);
-        let codex_weekly_accent = resolve_codex_accent(color_theme, codex_weekly_pct, is_dark);
-
-        let client_rect = RECT {
+        let full_rect = RECT {
             left: 0,
             top: 0,
             right: width,
             bottom: height,
         };
+        let black_brush = CreateSolidBrush(COLORREF(0));
+        FillRect(hdc, &full_rect, black_brush);
+        let _ = DeleteObject(black_brush);
 
-        let bg_brush = CreateSolidBrush(COLORREF(bg.to_colorref()));
-        FillRect(hdc, &client_rect, bg_brush);
+        let (cap_bg_rgb, border_rgb) = if is_dark {
+            ((30u8, 30u8, 34u8), (60u8, 60u8, 65u8))
+        } else {
+            ((251u8, 250u8, 250u8), (220u8, 222u8, 228u8))
+        };
+        let cap_bg = COLORREF(native_interop::colorref(cap_bg_rgb.0, cap_bg_rgb.1, cap_bg_rgb.2));
+        let border_color = COLORREF(native_interop::colorref(border_rgb.0, border_rgb.1, border_rgb.2));
+
+        let corner_r = sc(CAPSULE_RADIUS);
+        let rgn = CreateRoundRectRgn(0, 0, width + 1, height + 1, corner_r * 2, corner_r * 2);
+        let bg_brush = CreateSolidBrush(cap_bg);
+        let _ = FillRgn(hdc, rgn, bg_brush);
         let _ = DeleteObject(bg_brush);
 
-        // Left divider
-        let divider_h = sc(25);
-        let divider_top = (height - divider_h) / 2;
-        let divider_bottom = divider_top + divider_h;
+        let border_brush = CreateSolidBrush(border_color);
+        let _ = FrameRgn(hdc, rgn, border_brush, 1, 1);
+        let _ = DeleteObject(border_brush);
+        let _ = DeleteObject(rgn);
 
-        let (div_left, div_right) = if is_dark {
-            ((80, 80, 80), (40, 40, 40))
-        } else {
-            ((160, 160, 160), (230, 230, 230))
+        // Drag handle
+        let drag_h = sc(DRAG_HANDLE_HEIGHT);
+        let drag_top = (height - drag_h) / 2;
+        let drag_rect = RECT {
+            left: sc(10),
+            top: drag_top,
+            right: sc(10 + DRAG_HANDLE_WIDTH),
+            bottom: drag_top + drag_h,
         };
+        let drag_rgb = if is_dark { (100u8, 105u8, 115u8) } else { (180u8, 185u8, 195u8) };
+        let drag_brush = CreateSolidBrush(COLORREF(native_interop::colorref(drag_rgb.0, drag_rgb.1, drag_rgb.2)));
+        FillRect(hdc, &drag_rect, drag_brush);
+        let _ = DeleteObject(drag_brush);
 
-        let left_brush = CreateSolidBrush(COLORREF(native_interop::colorref(
-            div_left.0, div_left.1, div_left.2,
-        )));
-        let left_rect = RECT {
-            left: 0,
-            top: divider_top,
-            right: sc(2),
-            bottom: divider_bottom,
-        };
-        FillRect(hdc, &left_rect, left_brush);
-        let _ = DeleteObject(left_brush);
-
-        let right_brush = CreateSolidBrush(COLORREF(native_interop::colorref(
-            div_right.0,
-            div_right.1,
-            div_right.2,
-        )));
-        let right_rect = RECT {
-            left: sc(2),
-            top: divider_top,
-            right: sc(3),
-            bottom: divider_bottom,
-        };
-        FillRect(hdc, &right_rect, right_brush);
-        let _ = DeleteObject(right_brush);
-
-        let content_x = sc(LEFT_DIVIDER_W) + sc(DIVIDER_RIGHT_MARGIN);
-        let row2_y = height - sc(5) - sc(SEGMENT_H);
-        let row1_y = row2_y - sc(10) - sc(SEGMENT_H);
-        let single_row_y = (height - sc(SEGMENT_H)) / 2;
-
-        let _ = SetBkMode(hdc, TRANSPARENT);
-        let _ = SetTextColor(hdc, COLORREF(text_color.to_colorref()));
-
+        // Fonts
         let font_name = native_interop::wide_str("Segoe UI");
-        let font = CreateFontW(
-            sc(-12),
-            0,
-            0,
-            0,
-            FW_MEDIUM.0 as i32,
-            0,
-            0,
-            0,
+        let font_badge = CreateFontW(
+            sc(-9),
+            0, 0, 0,
+            FW_BOLD.0 as i32,
+            0, 0, 0,
             DEFAULT_CHARSET.0 as u32,
             OUT_TT_PRECIS.0 as u32,
             CLIP_DEFAULT_PRECIS.0 as u32,
@@ -2213,71 +2286,254 @@ fn paint_content(
             (DEFAULT_PITCH.0 | FF_DONTCARE.0) as u32,
             PCWSTR::from_raw(font_name.as_ptr()),
         );
-        let old_font = SelectObject(hdc, font);
+        let font_num = CreateFontW(
+            sc(-11),
+            0, 0, 0,
+            FW_BOLD.0 as i32,
+            0, 0, 0,
+            DEFAULT_CHARSET.0 as u32,
+            OUT_TT_PRECIS.0 as u32,
+            CLIP_DEFAULT_PRECIS.0 as u32,
+            CLEARTYPE_QUALITY.0 as u32,
+            (DEFAULT_PITCH.0 | FF_DONTCARE.0) as u32,
+            PCWSTR::from_raw(font_name.as_ptr()),
+        );
+        let font_time = CreateFontW(
+            sc(-9),
+            0, 0, 0,
+            FW_NORMAL.0 as i32,
+            0, 0, 0,
+            DEFAULT_CHARSET.0 as u32,
+            OUT_TT_PRECIS.0 as u32,
+            CLIP_DEFAULT_PRECIS.0 as u32,
+            CLEARTYPE_QUALITY.0 as u32,
+            (DEFAULT_PITCH.0 | FF_DONTCARE.0) as u32,
+            PCWSTR::from_raw(font_name.as_ptr()),
+        );
 
-        if show_session_window {
-            draw_row(
-                hdc,
-                content_x,
-                if show_weekly_window {
-                    row1_y
-                } else {
-                    single_row_y
-                },
-                is_dark,
-                text_color,
-                strings.session_window,
-                session_pct,
-                session_text,
+        let _ = SetBkMode(hdc, TRANSPARENT);
+
+        let mut active_list: Vec<(ModelKind, f64, &str, f64, &str)> = Vec::new();
+        if show_codex {
+            active_list.push((
+                ModelKind::Codex,
                 codex_session_pct,
                 codex_session_text,
-                antigravity_session_pct,
-                antigravity_session_text,
-                show_claude_code,
-                show_codex,
-                show_antigravity,
-                accent,
-                &codex_session_accent,
-                antigravity_accent,
-                track,
-                label_width,
-                text_width,
-                bar_style,
-            );
-        }
-        if show_weekly_window {
-            draw_row(
-                hdc,
-                content_x,
-                if show_session_window {
-                    row2_y
-                } else {
-                    single_row_y
-                },
-                is_dark,
-                text_color,
-                strings.weekly_window,
-                weekly_pct,
-                weekly_text,
                 codex_weekly_pct,
                 codex_weekly_text,
+            ));
+        }
+        if show_antigravity {
+            active_list.push((
+                ModelKind::Antigravity,
+                antigravity_session_pct,
+                antigravity_session_text,
                 antigravity_weekly_pct,
                 antigravity_weekly_text,
-                show_claude_code,
-                show_codex,
-                show_antigravity,
-                accent,
-                &codex_weekly_accent,
-                antigravity_accent,
-                track,
-                label_width,
-                text_width,
-                bar_style,
-            );
+            ));
+        }
+        if show_claude_code {
+            active_list.push((
+                ModelKind::ClaudeCode,
+                session_pct,
+                session_text,
+                weekly_pct,
+                weekly_text,
+            ));
+        }
+        if active_list.is_empty() {
+            active_list.push((ModelKind::Codex, 0.0, "--", 0.0, "--"));
         }
 
-        SelectObject(hdc, old_font);
-        let _ = DeleteObject(font);
+        let time_rgb = if is_dark { (148u8, 163u8, 184u8) } else { (100u8, 116u8, 139u8) };
+        let time_color = COLORREF(native_interop::colorref(time_rgb.0, time_rgb.1, time_rgb.2));
+
+        let div_rgb = if is_dark { (70u8, 75u8, 85u8) } else { (220u8, 224u8, 230u8) };
+        let div_brush = CreateSolidBrush(COLORREF(native_interop::colorref(div_rgb.0, div_rgb.1, div_rgb.2)));
+
+        let dpi_scale = sc(100) as f32 / 100.0;
+        let num_models = active_list.len();
+
+        for i in 0..num_models {
+            let (kind, p5h_raw, p5h_txt, p7d_raw, p7d_txt) = active_list[i];
+            let model_x = sc(CAPSULE_LEFT_PADDING) + (i as i32) * (sc(MODEL_BLOCK_WIDTH) + sc(MODEL_DIVIDER_WIDTH));
+
+            if i > 0 {
+                let div_h = sc(14);
+                let div_top = (height - div_h) / 2;
+                let div_x = model_x - sc(MODEL_DIVIDER_WIDTH) + sc(8);
+                let div_rect = RECT {
+                    left: div_x,
+                    top: div_top,
+                    right: div_x + sc(1),
+                    bottom: div_top + div_h,
+                };
+                FillRect(hdc, &div_rect, div_brush);
+            }
+
+            let p5h_val = usage_percent_for_display(language, p5h_raw);
+            let p7d_val = usage_percent_for_display(language, p7d_raw);
+            let (c5h, c7d) = resolve_model_colors(kind, p5h_raw, p7d_raw);
+
+            let ring_cx = (model_x + sc(14)) as f32;
+            let ring_cy = (height as f32) / 2.0;
+            if let Some(buf) = pixel_buffer.as_deref_mut() {
+                rasterize_concentric_ring(
+                    buf,
+                    width,
+                    height,
+                    ring_cx,
+                    ring_cy,
+                    if show_session_window { p5h_val as f32 } else { 0.0 },
+                    if show_weekly_window { p7d_val as f32 } else { 0.0 },
+                    kind,
+                    c5h,
+                    c7d,
+                    is_dark,
+                    dpi_scale,
+                );
+            }
+
+            let tx = model_x + sc(28) + sc(6);
+            let (p5h_num, p5h_time) = parse_display_parts(p5h_txt);
+            let (p7d_num, p7d_time) = parse_display_parts(p7d_txt);
+
+            let row1_y = if show_session_window && show_weekly_window {
+                sc(5)
+            } else {
+                (height - sc(12)) / 2
+            };
+            let row2_y = if show_session_window && show_weekly_window {
+                sc(19)
+            } else {
+                (height - sc(12)) / 2
+            };
+
+            if show_session_window {
+                let badge_bg = tint_bg(cap_bg_rgb, c5h, 0.15);
+                let badge_brush = CreateSolidBrush(badge_bg);
+                let badge_rgn = CreateRoundRectRgn(
+                    tx,
+                    row1_y + sc(1),
+                    tx + sc(13) + 1,
+                    row1_y + sc(12) + 1,
+                    sc(2) * 2,
+                    sc(2) * 2,
+                );
+                let _ = FillRgn(hdc, badge_rgn, badge_brush);
+                let _ = DeleteObject(badge_brush);
+                let _ = DeleteObject(badge_rgn);
+
+                let badge_txt_color = if is_dark {
+                    COLORREF(native_interop::colorref(c5h.0, c5h.1, c5h.2))
+                } else {
+                    let dark_r = ((c5h.0 as f32) * 0.75).round() as u8;
+                    let dark_g = ((c5h.1 as f32) * 0.75).round() as u8;
+                    let dark_b = ((c5h.2 as f32) * 0.75).round() as u8;
+                    COLORREF(native_interop::colorref(dark_r, dark_g, dark_b))
+                };
+                let _ = SelectObject(hdc, font_badge);
+                let _ = SetTextColor(hdc, badge_txt_color);
+                let mut badge_str: Vec<u16> = "5h".encode_utf16().collect();
+                let mut badge_rect = RECT {
+                    left: tx,
+                    top: row1_y + sc(1),
+                    right: tx + sc(13),
+                    bottom: row1_y + sc(12),
+                };
+                let _ = DrawTextW(hdc, &mut badge_str, &mut badge_rect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+
+                let _ = SelectObject(hdc, font_num);
+                let num_color = COLORREF(native_interop::colorref(c5h.0, c5h.1, c5h.2));
+                let _ = SetTextColor(hdc, num_color);
+                let mut num_str: Vec<u16> = p5h_num.encode_utf16().collect();
+                let mut num_rect = RECT {
+                    left: tx + sc(15),
+                    top: row1_y,
+                    right: tx + sc(41),
+                    bottom: row1_y + sc(13),
+                };
+                let _ = DrawTextW(hdc, &mut num_str, &mut num_rect, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
+
+                if !p5h_time.is_empty() {
+                    let _ = SelectObject(hdc, font_time);
+                    let _ = SetTextColor(hdc, time_color);
+                    let mut time_str: Vec<u16> = p5h_time.encode_utf16().collect();
+                    let mut time_rect = RECT {
+                        left: tx + sc(45),
+                        top: row1_y + sc(1),
+                        right: tx + sc(72),
+                        bottom: row1_y + sc(13),
+                    };
+                    let _ = DrawTextW(hdc, &mut time_str, &mut time_rect, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+                }
+            }
+
+            if show_weekly_window {
+                let badge_bg = tint_bg(cap_bg_rgb, c7d, 0.15);
+                let badge_brush = CreateSolidBrush(badge_bg);
+                let badge_rgn = CreateRoundRectRgn(
+                    tx,
+                    row2_y + sc(1),
+                    tx + sc(13) + 1,
+                    row2_y + sc(12) + 1,
+                    sc(2) * 2,
+                    sc(2) * 2,
+                );
+                let _ = FillRgn(hdc, badge_rgn, badge_brush);
+                let _ = DeleteObject(badge_brush);
+                let _ = DeleteObject(badge_rgn);
+
+                let badge_txt_color = if is_dark {
+                    COLORREF(native_interop::colorref(c7d.0, c7d.1, c7d.2))
+                } else {
+                    let dark_r = ((c7d.0 as f32) * 0.75).round() as u8;
+                    let dark_g = ((c7d.1 as f32) * 0.75).round() as u8;
+                    let dark_b = ((c7d.2 as f32) * 0.75).round() as u8;
+                    COLORREF(native_interop::colorref(dark_r, dark_g, dark_b))
+                };
+                let _ = SelectObject(hdc, font_badge);
+                let _ = SetTextColor(hdc, badge_txt_color);
+                let mut badge_str: Vec<u16> = "7d".encode_utf16().collect();
+                let mut badge_rect = RECT {
+                    left: tx,
+                    top: row2_y + sc(1),
+                    right: tx + sc(13),
+                    bottom: row2_y + sc(12),
+                };
+                let _ = DrawTextW(hdc, &mut badge_str, &mut badge_rect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+
+                let _ = SelectObject(hdc, font_num);
+                let num_color = COLORREF(native_interop::colorref(c7d.0, c7d.1, c7d.2));
+                let _ = SetTextColor(hdc, num_color);
+                let mut num_str: Vec<u16> = p7d_num.encode_utf16().collect();
+                let mut num_rect = RECT {
+                    left: tx + sc(15),
+                    top: row2_y,
+                    right: tx + sc(41),
+                    bottom: row2_y + sc(13),
+                };
+                let _ = DrawTextW(hdc, &mut num_str, &mut num_rect, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
+
+                if !p7d_time.is_empty() {
+                    let _ = SelectObject(hdc, font_time);
+                    let _ = SetTextColor(hdc, time_color);
+                    let mut time_str: Vec<u16> = p7d_time.encode_utf16().collect();
+                    let mut time_rect = RECT {
+                        left: tx + sc(45),
+                        top: row2_y + sc(1),
+                        right: tx + sc(72),
+                        bottom: row2_y + sc(13),
+                    };
+                    let _ = DrawTextW(hdc, &mut time_str, &mut time_rect, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+                }
+            }
+        }
+
+        let _ = DeleteObject(div_brush);
+        let _ = DeleteObject(font_badge);
+        let _ = DeleteObject(font_num);
+        let _ = DeleteObject(font_time);
     }
 }
 
@@ -2732,8 +2988,7 @@ fn position_at_taskbar() {
 }
 
 fn compute_anchor_y(anchor_top: i32, anchor_height: i32, widget_height: i32) -> i32 {
-    let anchor_bottom = anchor_top + anchor_height;
-    (anchor_bottom - widget_height).max(anchor_top)
+    anchor_top + ((anchor_height - widget_height) / 2).max(0)
 }
 
 /// WinEvent callback for tray icon location changes
@@ -3309,19 +3564,6 @@ unsafe extern "system" fn wnd_proc(
                     save_state_settings();
                     render_layered();
                 }
-                IDM_STYLE_SEGMENTED | IDM_STYLE_PILL => {
-                    {
-                        let mut state = lock_state();
-                        if let Some(s) = state.as_mut() {
-                            s.bar_style = match id {
-                                IDM_STYLE_PILL => BarStyle::Pill,
-                                _ => BarStyle::Segmented,
-                            };
-                        }
-                    }
-                    save_state_settings();
-                    render_layered();
-                }
                 IDM_THEME_EMERALD
                 | IDM_THEME_CORAL
                 | IDM_THEME_CYAN
@@ -3410,7 +3652,6 @@ fn show_context_menu(hwnd: HWND) {
             show_session_window,
             show_weekly_window,
             alert_threshold_percent,
-            bar_style,
             color_theme,
             text_format,
         ) = {
@@ -3431,7 +3672,6 @@ fn show_context_menu(hwnd: HWND) {
                     s.show_session_window,
                     s.show_weekly_window,
                     s.alert_threshold_percent,
-                    s.bar_style,
                     s.color_theme,
                     s.text_format,
                 ),
@@ -3450,7 +3690,6 @@ fn show_context_menu(hwnd: HWND) {
                     true,
                     true,
                     0,
-                    BarStyle::default(),
                     ColorTheme::default(),
                     TextFormat::default(),
                 ),
@@ -3667,51 +3906,7 @@ fn show_context_menu(hwnd: HWND) {
         let appearance_menu = CreatePopupMenu().unwrap();
         let is_zh = language == LanguageId::SimplifiedChinese;
 
-        // 1. Bar Style submenu
-        let style_menu = CreatePopupMenu().unwrap();
-        let seg_label = native_interop::wide_str(if is_zh {
-            "分段方块 (10格)"
-        } else {
-            "Segmented (10 blocks)"
-        });
-        let pill_label = native_interop::wide_str(if is_zh {
-            "平滑胶囊"
-        } else {
-            "Continuous Pill"
-        });
-        let _ = AppendMenuW(
-            style_menu,
-            if bar_style == BarStyle::Segmented {
-                MF_CHECKED
-            } else {
-                MENU_ITEM_FLAGS(0)
-            },
-            IDM_STYLE_SEGMENTED as usize,
-            PCWSTR::from_raw(seg_label.as_ptr()),
-        );
-        let _ = AppendMenuW(
-            style_menu,
-            if bar_style == BarStyle::Pill {
-                MF_CHECKED
-            } else {
-                MENU_ITEM_FLAGS(0)
-            },
-            IDM_STYLE_PILL as usize,
-            PCWSTR::from_raw(pill_label.as_ptr()),
-        );
-        let style_title = native_interop::wide_str(if is_zh {
-            "进度条样式"
-        } else {
-            "Bar style"
-        });
-        let _ = AppendMenuW(
-            appearance_menu,
-            MF_POPUP,
-            style_menu.0 as usize,
-            PCWSTR::from_raw(style_title.as_ptr()),
-        );
-
-        // 2. Color Theme submenu
+        // 1. Color Theme submenu
         let theme_menu = CreatePopupMenu().unwrap();
         let theme_items = [
             (
@@ -4011,9 +4206,6 @@ fn paint(hdc: HDC, hwnd: HWND) {
         show_antigravity,
         show_session_window,
         show_weekly_window,
-        bar_style,
-        color_theme,
-        text_format,
     ) = {
         let state = lock_state();
         match state.as_ref() {
@@ -4038,30 +4230,9 @@ fn paint(hdc: HDC, hwnd: HWND) {
                 s.show_antigravity,
                 s.show_session_window,
                 s.show_weekly_window,
-                s.bar_style,
-                s.color_theme,
-                s.text_format,
             ),
             None => return,
         }
-    };
-
-    let accent = claude_accent_color();
-    let antigravity_accent = antigravity_accent_color();
-    let track = if is_dark {
-        Color::from_hex("#444444")
-    } else {
-        Color::from_hex("#AAAAAA")
-    };
-    let text_color = if is_dark {
-        Color::from_hex("#888888")
-    } else {
-        Color::from_hex("#404040")
-    };
-    let bg_color = if is_dark {
-        Color::from_hex("#1C1C1C")
-    } else {
-        Color::from_hex("#F3F3F3")
     };
 
     unsafe {
@@ -4074,315 +4245,63 @@ fn paint(hdc: HDC, hwnd: HWND) {
             return;
         }
 
+        let bmi = BITMAPINFO {
+            bmiHeader: BITMAPINFOHEADER {
+                biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+                biWidth: width,
+                biHeight: -height, // top-down
+                biPlanes: 1,
+                biBitCount: 32,
+                biCompression: 0, // BI_RGB
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let mut bits: *mut std::ffi::c_void = std::ptr::null_mut();
         let mem_dc = CreateCompatibleDC(hdc);
-        let mem_bmp = CreateCompatibleBitmap(hdc, width, height);
-        let old_bmp = SelectObject(mem_dc, mem_bmp);
+        let dib =
+            CreateDIBSection(mem_dc, &bmi, DIB_RGB_COLORS, &mut bits, None, 0).unwrap_or_default();
 
-        paint_content(
-            mem_dc,
-            width,
-            height,
-            is_dark,
-            &bg_color,
-            &text_color,
-            &accent,
-            &track,
-            language,
-            strings,
-            session_pct,
-            &session_text,
-            weekly_pct,
-            &weekly_text,
-            codex_session_pct,
-            &codex_session_text,
-            codex_weekly_pct,
-            &codex_weekly_text,
-            antigravity_session_pct,
-            &antigravity_session_text,
-            antigravity_weekly_pct,
-            &antigravity_weekly_text,
-            show_claude_code,
-            show_codex,
-            show_antigravity,
-            show_session_window,
-            show_weekly_window,
-            &antigravity_accent,
-            bar_style,
-            color_theme,
-            text_format,
-        );
+        if !dib.is_invalid() && !bits.is_null() {
+            let old_bmp = SelectObject(mem_dc, dib);
+            let pixel_slice = std::slice::from_raw_parts_mut(bits as *mut u32, (width * height) as usize);
 
-        let _ = BitBlt(hdc, 0, 0, width, height, mem_dc, 0, 0, SRCCOPY);
+            paint_content(
+                mem_dc,
+                width,
+                height,
+                is_dark,
+                language,
+                strings,
+                session_pct,
+                &session_text,
+                weekly_pct,
+                &weekly_text,
+                codex_session_pct,
+                &codex_session_text,
+                codex_weekly_pct,
+                &codex_weekly_text,
+                antigravity_session_pct,
+                &antigravity_session_text,
+                antigravity_weekly_pct,
+                &antigravity_weekly_text,
+                show_claude_code,
+                show_codex,
+                show_antigravity,
+                show_session_window,
+                show_weekly_window,
+                Some(pixel_slice),
+            );
 
-        SelectObject(mem_dc, old_bmp);
-        let _ = DeleteObject(mem_bmp);
+            let _ = BitBlt(hdc, 0, 0, width, height, mem_dc, 0, 0, SRCCOPY);
+            SelectObject(mem_dc, old_bmp);
+            let _ = DeleteObject(dib);
+        }
         let _ = DeleteDC(mem_dc);
     }
 }
 
-fn draw_row(
-    hdc: HDC,
-    x: i32,
-    y: i32,
-    is_dark: bool,
-    text_color: &Color,
-    label: &str,
-    claude_percent: f64,
-    claude_text: &str,
-    codex_percent: f64,
-    codex_text: &str,
-    antigravity_percent: f64,
-    antigravity_text: &str,
-    show_claude_code: bool,
-    show_codex: bool,
-    show_antigravity: bool,
-    claude_accent: &Color,
-    codex_accent: &Color,
-    antigravity_accent: &Color,
-    track: &Color,
-    label_width: i32,
-    text_width: i32,
-    bar_style: BarStyle,
-) {
-    let seg_h = sc(SEGMENT_H);
-    let active_models = active_model_count(show_claude_code, show_codex, show_antigravity);
-    let segment_count = row_bar_segment_count(active_models);
-    let use_model_text_colors = active_models > 1;
-    let claude_value_color = if use_model_text_colors {
-        claude_usage_text_color(is_dark)
-    } else {
-        *text_color
-    };
-    let default_value_color = if is_dark {
-        Color::from_hex("#E2E8F0")
-    } else {
-        Color::from_hex("#1E293B")
-    };
-    let codex_value_color = if use_model_text_colors {
-        codex_usage_text_color(is_dark)
-    } else {
-        default_value_color
-    };
-    let antigravity_value_color = if use_model_text_colors {
-        antigravity_usage_text_color(is_dark)
-    } else {
-        *text_color
-    };
-
-    unsafe {
-        let _ = SetTextColor(hdc, COLORREF(text_color.to_colorref()));
-        let mut label_wide: Vec<u16> = label.encode_utf16().collect();
-        let mut label_rect = RECT {
-            left: x,
-            top: y,
-            right: x + sc(label_width),
-            bottom: y + seg_h,
-        };
-        let _ = DrawTextW(
-            hdc,
-            &mut label_wide,
-            &mut label_rect,
-            DT_LEFT | DT_VCENTER | DT_SINGLELINE,
-        );
-
-        let mut model_x = x + sc(label_width) + sc(LABEL_RIGHT_MARGIN);
-        if show_claude_code {
-            draw_usage_bar(
-                hdc,
-                model_x,
-                y,
-                segment_count,
-                claude_percent,
-                claude_text,
-                claude_accent,
-                track,
-                &claude_value_color,
-                text_width,
-                bar_style,
-            );
-            model_x += model_usage_width(segment_count, text_width) + sc(MODEL_RIGHT_MARGIN);
-        }
-        if show_codex {
-            draw_usage_bar(
-                hdc,
-                model_x,
-                y,
-                segment_count,
-                codex_percent,
-                codex_text,
-                codex_accent,
-                track,
-                &codex_value_color,
-                text_width,
-                bar_style,
-            );
-            model_x += model_usage_width(segment_count, text_width) + sc(MODEL_RIGHT_MARGIN);
-        }
-        if show_antigravity {
-            draw_usage_bar(
-                hdc,
-                model_x,
-                y,
-                segment_count,
-                antigravity_percent,
-                antigravity_text,
-                antigravity_accent,
-                track,
-                &antigravity_value_color,
-                text_width,
-                bar_style,
-            );
-        }
-    }
-}
-
-fn model_usage_width(segment_count: i32, text_width: i32) -> i32 {
-    (sc(SEGMENT_W) + sc(SEGMENT_GAP)) * segment_count - sc(SEGMENT_GAP)
-        + sc(BAR_RIGHT_MARGIN)
-        + sc(text_width)
-}
-
-fn draw_usage_bar(
-    hdc: HDC,
-    bar_x: i32,
-    y: i32,
-    segment_count: i32,
-    percent: f64,
-    text: &str,
-    accent: &Color,
-    track: &Color,
-    text_color: &Color,
-    text_width: i32,
-    bar_style: BarStyle,
-) {
-    let seg_w = sc(SEGMENT_W);
-    let seg_h = sc(SEGMENT_H);
-    let seg_gap = sc(SEGMENT_GAP);
-    let bar_width = segment_count * (seg_w + seg_gap) - seg_gap;
-
-    unsafe {
-        let percent_clamped = percent.clamp(0.0, 100.0);
-
-        match bar_style {
-            BarStyle::Segmented => {
-                let corner_r = sc(CORNER_RADIUS);
-                let segment_percent = 100.0 / segment_count as f64;
-
-                for i in 0..segment_count {
-                    let seg_x = bar_x + i * (seg_w + seg_gap);
-                    let seg_start = (i as f64) * segment_percent;
-                    let seg_end = seg_start + segment_percent;
-
-                    let seg_rect = RECT {
-                        left: seg_x,
-                        top: y,
-                        right: seg_x + seg_w,
-                        bottom: y + seg_h,
-                    };
-
-                    if percent_clamped >= seg_end {
-                        draw_rounded_rect(hdc, &seg_rect, accent, corner_r);
-                    } else if percent_clamped <= seg_start {
-                        draw_rounded_rect(hdc, &seg_rect, track, corner_r);
-                    } else {
-                        draw_rounded_rect(hdc, &seg_rect, track, corner_r);
-                        let fraction = (percent_clamped - seg_start) / segment_percent;
-                        let fill_width = (seg_w as f64 * fraction).round() as i32;
-                        if fill_width > 0 {
-                            let fill_rect = RECT {
-                                left: seg_x,
-                                top: y,
-                                right: seg_x + fill_width,
-                                bottom: y + seg_h,
-                            };
-                            let rgn = CreateRoundRectRgn(
-                                seg_rect.left,
-                                seg_rect.top,
-                                seg_rect.right + 1,
-                                seg_rect.bottom + 1,
-                                corner_r * 2,
-                                corner_r * 2,
-                            );
-                            let _ = SelectClipRgn(hdc, rgn);
-                            let brush = CreateSolidBrush(COLORREF(accent.to_colorref()));
-                            FillRect(hdc, &fill_rect, brush);
-                            let _ = DeleteObject(brush);
-                            let _ = SelectClipRgn(hdc, HRGN::default());
-                            let _ = DeleteObject(rgn);
-                        }
-                    }
-                }
-            }
-            BarStyle::Pill => {
-                let corner_r = seg_h / 2;
-                let bar_rect = RECT {
-                    left: bar_x,
-                    top: y,
-                    right: bar_x + bar_width,
-                    bottom: y + seg_h,
-                };
-                draw_rounded_rect(hdc, &bar_rect, track, corner_r);
-
-                let fill_width = (bar_width as f64 * percent_clamped / 100.0).round() as i32;
-                if fill_width > 0 {
-                    let fill_rect = RECT {
-                        left: bar_x,
-                        top: y,
-                        right: bar_x + fill_width,
-                        bottom: y + seg_h,
-                    };
-                    let rgn = CreateRoundRectRgn(
-                        bar_rect.left,
-                        bar_rect.top,
-                        bar_rect.right + 1,
-                        bar_rect.bottom + 1,
-                        corner_r * 2,
-                        corner_r * 2,
-                    );
-                    let _ = SelectClipRgn(hdc, rgn);
-                    let brush = CreateSolidBrush(COLORREF(accent.to_colorref()));
-                    FillRect(hdc, &fill_rect, brush);
-                    let _ = DeleteObject(brush);
-                    let _ = SelectClipRgn(hdc, HRGN::default());
-                    let _ = DeleteObject(rgn);
-                }
-            }
-        }
-
-        let text_x = bar_x + bar_width + sc(BAR_RIGHT_MARGIN);
-        let mut text_wide: Vec<u16> = text.encode_utf16().collect();
-        let mut text_rect = RECT {
-            left: text_x,
-            top: y,
-            right: text_x + sc(text_width),
-            bottom: y + seg_h,
-        };
-        let _ = SetTextColor(hdc, COLORREF(text_color.to_colorref()));
-        let _ = DrawTextW(
-            hdc,
-            &mut text_wide,
-            &mut text_rect,
-            DT_LEFT | DT_VCENTER | DT_SINGLELINE,
-        );
-    }
-}
-
-fn draw_rounded_rect(hdc: HDC, rect: &RECT, color: &Color, radius: i32) {
-    unsafe {
-        let brush = CreateSolidBrush(COLORREF(color.to_colorref()));
-        let rgn = CreateRoundRectRgn(
-            rect.left,
-            rect.top,
-            rect.right + 1,
-            rect.bottom + 1,
-            radius * 2,
-            radius * 2,
-        );
-        let _ = FillRgn(hdc, rgn, brush);
-        let _ = DeleteObject(rgn);
-        let _ = DeleteObject(brush);
-    }
-}
 
 #[cfg(test)]
 mod tests {

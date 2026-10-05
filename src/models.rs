@@ -1,13 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::time::SystemTime;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "lowercase")]
-pub enum BarStyle {
-    #[default]
-    Segmented,
-    Pill,
-}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
