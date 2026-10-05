@@ -4,13 +4,21 @@ use std::time::SystemTime;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
+pub enum ColorMode {
+    #[default]
+    Colorful,
+    Monochrome,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
 pub enum ColorTheme {
     #[default]
-    Emerald,    // OpenAI Green #10A37F
-    Coral,      // Claude Warm Coral #D97757
-    Cyan,       // Cyber Cyan #00B4D8
-    Dynamic,    // Dynamic: Green (>40%) -> Amber (20-40%) -> Red (<20%)
-    Monochrome, // Clean White/Black
+    Emerald,
+    Coral,
+    Cyan,
+    Dynamic,
+    Monochrome,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]

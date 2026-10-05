@@ -19,7 +19,7 @@ use windows::Win32::UI::WindowsAndMessaging::*;
 
 use crate::diagnose;
 use crate::localization::{self, LanguageId, Strings};
-use crate::models::{AppUsageData, ColorTheme, TextFormat};
+use crate::models::{AppUsageData, ColorMode, ColorTheme, TextFormat};
 use crate::native_interop::{
     self, TIMER_COUNTDOWN, TIMER_POLL, TIMER_RESET_POLL, TIMER_UPDATE_CHECK, WM_APP_TRAY,
     WM_APP_USAGE_UPDATED,
@@ -103,6 +103,7 @@ struct AppState {
     drag_start_offset: i32,
 
     widget_visible: bool,
+    color_mode: ColorMode,
     color_theme: ColorTheme,
     text_format: TextFormat,
 }
@@ -153,17 +154,9 @@ const IDM_ALERT_10: u16 = 81;
 const IDM_ALERT_20: u16 = 82;
 const IDM_ALERT_30: u16 = 83;
 
-// Color theme
-const IDM_THEME_EMERALD: u16 = 100;
-const IDM_THEME_CORAL: u16 = 101;
-const IDM_THEME_CYAN: u16 = 102;
-const IDM_THEME_DYNAMIC: u16 = 103;
-const IDM_THEME_MONOCHROME: u16 = 104;
-
-// Text format
-const IDM_TEXT_COMPACT: u16 = 110;
-const IDM_TEXT_VERBOSE: u16 = 111;
-const IDM_TEXT_COUNTDOWN: u16 = 112;
+// Color mode
+const IDM_MODE_COLORFUL: u16 = 100;
+const IDM_MODE_MONOCHROME: u16 = 101;
 
 const WM_DPICHANGED_MSG: u32 = 0x02E0;
 const WM_APP_UPDATE_CHECK_COMPLETE: u32 = WM_APP + 2;
@@ -367,6 +360,8 @@ struct SettingsFile {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     notified_quota_windows: Vec<String>,
     #[serde(default)]
+    color_mode: ColorMode,
+    #[serde(default)]
     color_theme: ColorTheme,
     #[serde(default)]
     text_format: TextFormat,
@@ -388,6 +383,7 @@ impl Default for SettingsFile {
             show_weekly_window: true,
             alert_threshold_percent: 0,
             notified_quota_windows: Vec::new(),
+            color_mode: ColorMode::default(),
             color_theme: ColorTheme::default(),
             text_format: TextFormat::default(),
         }
@@ -516,6 +512,7 @@ fn save_state_settings() {
             show_weekly_window: s.show_weekly_window,
             alert_threshold_percent: s.alert_threshold_percent,
             notified_quota_windows: s.notified_quota_windows.iter().cloned().collect(),
+            color_mode: s.color_mode,
             color_theme: s.color_theme,
             text_format: s.text_format,
         });
@@ -1678,6 +1675,7 @@ pub fn run() {
                 drag_start_client_x: 0,
                 drag_start_offset: 0,
                 widget_visible: settings.widget_visible,
+                color_mode: settings.color_mode,
                 color_theme: settings.color_theme,
                 text_format: settings.text_format,
             });
@@ -1790,6 +1788,7 @@ fn render_layered() {
         show_antigravity,
         show_session_window,
         show_weekly_window,
+        color_mode,
     ) = {
         let state = lock_state();
         match state.as_ref() {
@@ -1816,6 +1815,7 @@ fn render_layered() {
                 s.show_antigravity,
                 s.show_session_window,
                 s.show_weekly_window,
+                s.color_mode,
             ),
             None => return,
         }
@@ -1869,6 +1869,7 @@ fn render_layered() {
             width,
             height,
             is_dark,
+            color_mode,
             language,
             strings,
             session_pct,
@@ -1931,6 +1932,7 @@ fn paint_content(
     width: i32,
     height: i32,
     is_dark: bool,
+    color_mode: ColorMode,
     language: LanguageId,
     _strings: Strings,
     session_pct: f64,
@@ -2084,7 +2086,7 @@ fn paint_content(
 
             let p5h_val = usage_percent_for_display(language, p5h_raw);
             let p7d_val = usage_percent_for_display(language, p7d_raw);
-            let (c5h, c7d) = resolve_model_colors(kind, p5h_raw, p7d_raw);
+            let (c5h, c7d) = resolve_model_colors(kind, color_mode, is_dark, p5h_raw, p7d_raw);
 
             let ring_cx = (model_x + sc(14)) as f32;
             let ring_cy = (height as f32) / 2.0;
@@ -2105,7 +2107,7 @@ fn paint_content(
                 );
             }
 
-            let tx = model_x + sc(28) + sc(6);
+            let tx = model_x + sc(31);
             let (p5h_num, p5h_time) = parse_display_parts(p5h_txt);
             let (p7d_num, p7d_time) = parse_display_parts(p7d_txt);
 
@@ -2159,9 +2161,9 @@ fn paint_content(
                 let _ = SetTextColor(hdc, num_color);
                 let mut num_str: Vec<u16> = p5h_num.encode_utf16().collect();
                 let mut num_rect = RECT {
-                    left: tx + sc(15),
+                    left: tx + sc(16),
                     top: row1_y,
-                    right: tx + sc(41),
+                    right: tx + sc(49),
                     bottom: row1_y + sc(13),
                 };
                 let _ = DrawTextW(hdc, &mut num_str, &mut num_rect, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
@@ -2171,9 +2173,9 @@ fn paint_content(
                     let _ = SetTextColor(hdc, time_color);
                     let mut time_str: Vec<u16> = p5h_time.encode_utf16().collect();
                     let mut time_rect = RECT {
-                        left: tx + sc(45),
+                        left: tx + sc(53),
                         top: row1_y + sc(1),
-                        right: tx + sc(78),
+                        right: tx + sc(81),
                         bottom: row1_y + sc(13),
                     };
                     let _ = DrawTextW(hdc, &mut time_str, &mut time_rect, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
@@ -2219,9 +2221,9 @@ fn paint_content(
                 let _ = SetTextColor(hdc, num_color);
                 let mut num_str: Vec<u16> = p7d_num.encode_utf16().collect();
                 let mut num_rect = RECT {
-                    left: tx + sc(15),
+                    left: tx + sc(16),
                     top: row2_y,
-                    right: tx + sc(41),
+                    right: tx + sc(49),
                     bottom: row2_y + sc(13),
                 };
                 let _ = DrawTextW(hdc, &mut num_str, &mut num_rect, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
@@ -2231,9 +2233,9 @@ fn paint_content(
                     let _ = SetTextColor(hdc, time_color);
                     let mut time_str: Vec<u16> = p7d_time.encode_utf16().collect();
                     let mut time_rect = RECT {
-                        left: tx + sc(45),
+                        left: tx + sc(53),
                         top: row2_y + sc(1),
-                        right: tx + sc(78),
+                        right: tx + sc(81),
                         bottom: row2_y + sc(13),
                     };
                     let _ = DrawTextW(hdc, &mut time_str, &mut time_rect, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
@@ -3275,40 +3277,17 @@ unsafe extern "system" fn wnd_proc(
                     save_state_settings();
                     render_layered();
                 }
-                IDM_THEME_EMERALD
-                | IDM_THEME_CORAL
-                | IDM_THEME_CYAN
-                | IDM_THEME_DYNAMIC
-                | IDM_THEME_MONOCHROME => {
+                IDM_MODE_COLORFUL | IDM_MODE_MONOCHROME => {
                     {
                         let mut state = lock_state();
                         if let Some(s) = state.as_mut() {
-                            s.color_theme = match id {
-                                IDM_THEME_CORAL => ColorTheme::Coral,
-                                IDM_THEME_CYAN => ColorTheme::Cyan,
-                                IDM_THEME_DYNAMIC => ColorTheme::Dynamic,
-                                IDM_THEME_MONOCHROME => ColorTheme::Monochrome,
-                                _ => ColorTheme::Emerald,
+                            s.color_mode = match id {
+                                IDM_MODE_MONOCHROME => ColorMode::Monochrome,
+                                _ => ColorMode::Colorful,
                             };
                         }
                     }
                     save_state_settings();
-                    render_layered();
-                }
-                IDM_TEXT_COMPACT | IDM_TEXT_VERBOSE | IDM_TEXT_COUNTDOWN => {
-                    {
-                        let mut state = lock_state();
-                        if let Some(s) = state.as_mut() {
-                            s.text_format = match id {
-                                IDM_TEXT_VERBOSE => TextFormat::Verbose,
-                                IDM_TEXT_COUNTDOWN => TextFormat::Countdown,
-                                _ => TextFormat::Compact,
-                            };
-                            refresh_usage_texts(s);
-                        }
-                    }
-                    save_state_settings();
-                    position_at_taskbar();
                     render_layered();
                 }
                 id if id == tray_icon::IDM_TOGGLE_WIDGET => {
@@ -3363,8 +3342,7 @@ fn show_context_menu(hwnd: HWND) {
             show_session_window,
             show_weekly_window,
             alert_threshold_percent,
-            color_theme,
-            text_format,
+            color_mode,
         ) = {
             let state = lock_state();
             match state.as_ref() {
@@ -3383,8 +3361,7 @@ fn show_context_menu(hwnd: HWND) {
                     s.show_session_window,
                     s.show_weekly_window,
                     s.alert_threshold_percent,
-                    s.color_theme,
-                    s.text_format,
+                    s.color_mode,
                 ),
                 None => (
                     POLL_15_MIN,
@@ -3401,8 +3378,7 @@ fn show_context_menu(hwnd: HWND) {
                     true,
                     true,
                     0,
-                    ColorTheme::default(),
-                    TextFormat::default(),
+                    ColorMode::default(),
                 ),
             }
         };
@@ -3613,152 +3589,53 @@ fn show_context_menu(hwnd: HWND) {
             PCWSTR::from_raw(alert_label.as_ptr()),
         );
 
-        // Appearance submenu
-        let appearance_menu = CreatePopupMenu().unwrap();
+        // Color mode submenu
+        let mode_menu = CreatePopupMenu().unwrap();
         let is_zh = language == LanguageId::SimplifiedChinese;
-
-        // 1. Color Theme submenu
-        let theme_menu = CreatePopupMenu().unwrap();
-        let theme_items = [
+        let mode_items = [
             (
-                IDM_THEME_EMERALD,
-                ColorTheme::Emerald,
+                IDM_MODE_COLORFUL,
+                ColorMode::Colorful,
                 if is_zh {
-                    "科技翡翠绿 (OpenAI)"
+                    "经典彩色"
                 } else {
-                    "Emerald Green (OpenAI)"
+                    "Classic Color"
                 },
             ),
             (
-                IDM_THEME_CORAL,
-                ColorTheme::Coral,
+                IDM_MODE_MONOCHROME,
+                ColorMode::Monochrome,
                 if is_zh {
-                    "暖珊瑚橙 (Claude)"
-                } else {
-                    "Warm Coral (Claude)"
-                },
-            ),
-            (
-                IDM_THEME_CYAN,
-                ColorTheme::Cyan,
-                if is_zh {
-                    "极客青蓝"
-                } else {
-                    "Cyber Cyan"
-                },
-            ),
-            (
-                IDM_THEME_DYNAMIC,
-                ColorTheme::Dynamic,
-                if is_zh {
-                    "动态电量 (绿/黄/红)"
-                } else {
-                    "Dynamic Status"
-                },
-            ),
-            (
-                IDM_THEME_MONOCHROME,
-                ColorTheme::Monochrome,
-                if is_zh {
-                    "极简单色"
+                    "纯黑白灰"
                 } else {
                     "Monochrome"
                 },
             ),
         ];
-        for (id, thm, label) in theme_items {
+        for (id, mode, label) in mode_items {
             let label_str = native_interop::wide_str(label);
-            let flags = if color_theme == thm {
+            let flags = if color_mode == mode {
                 MF_CHECKED
             } else {
                 MENU_ITEM_FLAGS(0)
             };
             let _ = AppendMenuW(
-                theme_menu,
+                mode_menu,
                 flags,
                 id as usize,
                 PCWSTR::from_raw(label_str.as_ptr()),
             );
         }
-        let theme_title = native_interop::wide_str(if is_zh {
-            "色彩主题"
+        let mode_title = native_interop::wide_str(if is_zh {
+            "色彩模式"
         } else {
-            "Color theme"
-        });
-        let _ = AppendMenuW(
-            appearance_menu,
-            MF_POPUP,
-            theme_menu.0 as usize,
-            PCWSTR::from_raw(theme_title.as_ptr()),
-        );
-
-        // 3. Text Format submenu
-        let fmt_menu = CreatePopupMenu().unwrap();
-        let fmt_items = [
-            (
-                IDM_TEXT_COMPACT,
-                TextFormat::Compact,
-                if is_zh {
-                    "紧凑模式 (65% · 14:59)"
-                } else {
-                    "Compact (65% · 14:59)"
-                },
-            ),
-            (
-                IDM_TEXT_VERBOSE,
-                TextFormat::Verbose,
-                if is_zh {
-                    "详细模式 (剩余65% 14:59重置)"
-                } else {
-                    "Verbose"
-                },
-            ),
-            (
-                IDM_TEXT_COUNTDOWN,
-                TextFormat::Countdown,
-                if is_zh {
-                    "倒计时模式 (65% · 3h)"
-                } else {
-                    "Countdown (65% · 3h)"
-                },
-            ),
-        ];
-        for (id, fmt, label) in fmt_items {
-            let label_str = native_interop::wide_str(label);
-            let flags = if text_format == fmt {
-                MF_CHECKED
-            } else {
-                MENU_ITEM_FLAGS(0)
-            };
-            let _ = AppendMenuW(
-                fmt_menu,
-                flags,
-                id as usize,
-                PCWSTR::from_raw(label_str.as_ptr()),
-            );
-        }
-        let fmt_title = native_interop::wide_str(if is_zh {
-            "文本排版"
-        } else {
-            "Text layout"
-        });
-        let _ = AppendMenuW(
-            appearance_menu,
-            MF_POPUP,
-            fmt_menu.0 as usize,
-            PCWSTR::from_raw(fmt_title.as_ptr()),
-        );
-
-        let appearance_title = native_interop::wide_str(if is_zh {
-            "外观样式"
-        } else {
-            "Appearance"
+            "Color Mode"
         });
         let _ = AppendMenuW(
             menu,
             MF_POPUP,
-            appearance_menu.0 as usize,
-            PCWSTR::from_raw(appearance_title.as_ptr()),
+            mode_menu.0 as usize,
+            PCWSTR::from_raw(mode_title.as_ptr()),
         );
 
         // Settings submenu
@@ -4253,8 +4130,8 @@ mod tests {
 
     #[test]
     fn concentric_capsule_geometry_and_colors() {
-        assert_eq!(total_widget_width_for(1, LanguageId::English, TextFormat::default()), 140);
-        assert_eq!(total_widget_width_for(2, LanguageId::English, TextFormat::default()), 263);
+        assert_eq!(total_widget_width_for(1, LanguageId::English, TextFormat::default()), 148);
+        assert_eq!(total_widget_width_for(2, LanguageId::English, TextFormat::default()), 279);
 
         let (pct, time) = parse_display_parts("100% · 21:00");
         assert_eq!(pct, "100%");
@@ -4276,12 +4153,16 @@ mod tests {
         assert_eq!(pct, "--");
         assert_eq!(time, "");
 
-        let (codex_5h, codex_7d) = resolve_model_colors(ModelKind::Codex, 50.0, 50.0);
+        let (codex_5h, codex_7d) = resolve_model_colors(ModelKind::Codex, ColorMode::Colorful, false, 50.0, 50.0);
         assert_eq!(codex_5h, (16, 185, 129));
         assert_eq!(codex_7d, (245, 158, 11));
 
-        let (agy_5h, agy_7d) = resolve_model_colors(ModelKind::Antigravity, 50.0, 50.0);
+        let (agy_5h, agy_7d) = resolve_model_colors(ModelKind::Antigravity, ColorMode::Colorful, false, 50.0, 50.0);
         assert_eq!(agy_5h, (59, 130, 246));
         assert_eq!(agy_7d, (245, 158, 11));
+
+        let (mono_5h, mono_7d) = resolve_model_colors(ModelKind::Codex, ColorMode::Monochrome, false, 50.0, 50.0);
+        assert_eq!(mono_5h, (30, 41, 59));
+        assert_eq!(mono_7d, (100, 116, 139));
     }
 }

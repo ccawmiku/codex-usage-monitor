@@ -1,13 +1,14 @@
-use std::f32::consts::{FRAC_PI_2, PI, TAU};
+use std::f32::consts::{FRAC_PI_2, TAU};
 use windows::Win32::Foundation::COLORREF;
 
+use crate::models::ColorMode;
 use crate::native_interop;
 use crate::poller;
 
 pub const CAPSULE_RADIUS: i32 = 12;
 pub const DRAG_HANDLE_WIDTH: i32 = 2;
 pub const DRAG_HANDLE_HEIGHT: i32 = 14;
-pub const MODEL_BLOCK_WIDTH: i32 = 106;
+pub const MODEL_BLOCK_WIDTH: i32 = 114;
 pub const MODEL_DIVIDER_WIDTH: i32 = 17;
 pub const CAPSULE_LEFT_PADDING: i32 = 20;
 pub const CAPSULE_RIGHT_PADDING: i32 = 14;
@@ -75,190 +76,54 @@ pub fn tint_bg(bg: (u8, u8, u8), accent: (u8, u8, u8), factor: f32) -> COLORREF 
 
 pub fn resolve_model_colors(
     kind: ModelKind,
+    color_mode: ColorMode,
+    is_dark: bool,
     p5h: f64,
     p7d: f64,
 ) -> ((u8, u8, u8), (u8, u8, u8)) {
-    let c5h_normal = match kind {
-        ModelKind::Codex => (16u8, 185u8, 129u8),      // Emerald
-        ModelKind::Antigravity => (59u8, 130u8, 246u8), // Blue
-        ModelKind::ClaudeCode => (217u8, 119u8, 87u8),  // Terracotta
-    };
-    let c7d_normal = (245u8, 158u8, 11u8);              // Amber for 7d (both Codex and AGY)
+    match color_mode {
+        ColorMode::Colorful => {
+            let c5h_normal = match kind {
+                ModelKind::Codex => (16u8, 185u8, 129u8),      // Emerald #10B981
+                ModelKind::Antigravity => (59u8, 130u8, 246u8), // Blue #3B82F6
+                ModelKind::ClaudeCode => (217u8, 119u8, 87u8),  // Terracotta #D97757
+            };
+            let c7d_normal = (245u8, 158u8, 11u8);              // Amber for 7d (both Codex and AGY)
 
-    let red_warning = (239u8, 68u8, 68u8);
+            let red_warning = (239u8, 68u8, 68u8);
 
-    let c5h = if p5h > 0.0 && poller::remaining_percentage(p5h) <= 20.0 {
-        red_warning
-    } else {
-        c5h_normal
-    };
+            let c5h = if p5h > 0.0 && poller::remaining_percentage(p5h) <= 20.0 {
+                red_warning
+            } else {
+                c5h_normal
+            };
 
-    let c7d = if p7d > 0.0 && poller::remaining_percentage(p7d) <= 20.0 {
-        red_warning
-    } else {
-        c7d_normal
-    };
+            let c7d = if p7d > 0.0 && poller::remaining_percentage(p7d) <= 20.0 {
+                red_warning
+            } else {
+                c7d_normal
+            };
 
-    (c5h, c7d)
-}
-
-/// Software rasterizer for OpenAI spiral icon at the center of the concentric rings.
-pub fn rasterize_openai_logo(
-    buffer: &mut [u32],
-    buf_w: i32,
-    buf_h: i32,
-    cx: f32,
-    cy: f32,
-    is_dark: bool,
-    dpi_scale: f32,
-) {
-    let logo_color: (u8, u8, u8) = if is_dark {
-        (241, 245, 249)
-    } else {
-        (30, 41, 59)
-    };
-    let center_r = 1.0 * dpi_scale;
-    let seg_r_center = 2.4 * dpi_scale;
-    let seg_half_w = 0.52 * dpi_scale;
-
-    let min_x = ((cx - 4.5 * dpi_scale).floor() as i32).max(0);
-    let max_x = ((cx + 4.5 * dpi_scale).ceil() as i32).min(buf_w - 1);
-    let min_y = ((cy - 4.5 * dpi_scale).floor() as i32).max(0);
-    let max_y = ((cy + 4.5 * dpi_scale).ceil() as i32).min(buf_h - 1);
-
-    for py in min_y..=max_y {
-        for px in min_x..=max_x {
-            let dx = (px as f32 + 0.5) - cx;
-            let dy = (py as f32 + 0.5) - cy;
-            let dist_center = (dx * dx + dy * dy).sqrt();
-
-            let mut min_d = (dist_center - center_r).abs();
-
-            for k in 0..6 {
-                let rot = (k as f32) * PI / 3.0;
-                let seg_cx = seg_r_center * rot.cos();
-                let seg_cy = seg_r_center * rot.sin();
-                let d_pt = ((dx - seg_cx) * (dx - seg_cx) + (dy - seg_cy) * (dy - seg_cy)).sqrt();
-                min_d = min_d.min(d_pt);
-            }
-
-            let a = (0.5 - (min_d - seg_half_w)).clamp(0.0, 1.0);
-            if a > 0.0 {
-                let idx = (py * buf_w + px) as usize;
-                let current = buffer[idx];
-                let bg_a = ((current >> 24) & 0xFF) as f32 / 255.0;
-                let bg_r = ((current >> 16) & 0xFF) as f32;
-                let bg_g = ((current >> 8) & 0xFF) as f32;
-                let bg_b = (current & 0xFF) as f32;
-
-                let fg_r = logo_color.0 as f32;
-                let fg_g = logo_color.1 as f32;
-                let fg_b = logo_color.2 as f32;
-
-                let out_a = a + bg_a * (1.0 - a);
-                let out_r = ((fg_r * a + bg_r * (1.0 - a)).round() as u32).min(255);
-                let out_g = ((fg_g * a + bg_g * (1.0 - a)).round() as u32).min(255);
-                let out_b = ((fg_b * a + bg_b * (1.0 - a)).round() as u32).min(255);
-                let out_a_byte = ((out_a * 255.0).round() as u32).min(255);
-
-                buffer[idx] = (out_a_byte << 24) | (out_r << 16) | (out_g << 8) | out_b;
+            (c5h, c7d)
+        }
+        ColorMode::Monochrome => {
+            // Pure black / white / gray version
+            if is_dark {
+                // In dark mode: crisp white for 5h, silver gray for 7d
+                let c5h = (255u8, 255u8, 255u8); // Pure White #FFFFFF
+                let c7d = (160u8, 174u8, 192u8); // Slate Silver #A0AEC0
+                (c5h, c7d)
+            } else {
+                // In light mode: deep slate for 5h, graphite gray for 7d
+                let c5h = (30u8, 41u8, 59u8);    // Deep Slate #1E293B
+                let c7d = (100u8, 116u8, 139u8); // Graphite Gray #64748B
+                (c5h, c7d)
             }
         }
     }
 }
 
-/// Software rasterizer for Google 'G' icon at the center of the concentric rings.
-pub fn rasterize_google_logo(
-    buffer: &mut [u32],
-    buf_w: i32,
-    buf_h: i32,
-    cx: f32,
-    cy: f32,
-    dpi_scale: f32,
-) {
-    let r_outer = 4.2 * dpi_scale;
-    let r_inner = 2.4 * dpi_scale;
-    let r_mid = (r_outer + r_inner) * 0.5;
-    let stroke_w = r_outer - r_inner;
-
-    let min_x = ((cx - 5.0 * dpi_scale).floor() as i32).max(0);
-    let max_x = ((cx + 5.0 * dpi_scale).ceil() as i32).min(buf_w - 1);
-    let min_y = ((cy - 5.0 * dpi_scale).floor() as i32).max(0);
-    let max_y = ((cy + 5.0 * dpi_scale).ceil() as i32).min(buf_h - 1);
-
-    for py in min_y..=max_y {
-        for px in min_x..=max_x {
-            let dx = (px as f32 + 0.5) - cx;
-            let dy = (py as f32 + 0.5) - cy;
-            let r = (dx * dx + dy * dy).sqrt();
-
-            if r > 5.2 * dpi_scale {
-                continue;
-            }
-
-            let angle = dy.atan2(dx);
-            let mut th = angle;
-            if th < 0.0 {
-                th += TAU;
-            }
-
-            let mut d_curve = (r - r_mid).abs();
-            let mut is_in_gap = false;
-            if th > 5.58 || th < 0.70 {
-                is_in_gap = true;
-            }
-
-            let d_bar_y = dy.abs();
-            let bar_a = if dx >= 0.0 && dx <= r_outer && d_bar_y <= (stroke_w * 0.5) {
-                (0.5 - (d_bar_y - stroke_w * 0.5)).clamp(0.0, 1.0)
-            } else {
-                0.0
-            };
-
-            let arc_a = if !is_in_gap {
-                (0.5 - (d_curve - stroke_w * 0.5)).clamp(0.0, 1.0)
-            } else {
-                0.0
-            };
-
-            let a = arc_a.max(bar_a);
-            if a <= 0.0 {
-                continue;
-            }
-
-            let color: (u8, u8, u8) = if bar_a > arc_a {
-                (66, 133, 244) // Blue horizontal crossbar
-            } else if th >= 0.70 && th < 2.35 {
-                (52, 168, 83)  // Green bottom
-            } else if th >= 2.35 && th < 3.92 {
-                (251, 188, 5)  // Yellow left
-            } else {
-                (234, 67, 53)  // Red top
-            };
-
-            let idx = (py * buf_w + px) as usize;
-            let current = buffer[idx];
-            let bg_a = ((current >> 24) & 0xFF) as f32 / 255.0;
-            let bg_r = ((current >> 16) & 0xFF) as f32;
-            let bg_g = ((current >> 8) & 0xFF) as f32;
-            let bg_b = (current & 0xFF) as f32;
-
-            let fg_r = color.0 as f32;
-            let fg_g = color.1 as f32;
-            let fg_b = color.2 as f32;
-
-            let out_a = a + bg_a * (1.0 - a);
-            let out_r = ((fg_r * a + bg_r * (1.0 - a)).round() as u32).min(255);
-            let out_g = ((fg_g * a + bg_g * (1.0 - a)).round() as u32).min(255);
-            let out_b = ((fg_b * a + bg_b * (1.0 - a)).round() as u32).min(255);
-            let out_a_byte = ((out_a * 255.0).round() as u32).min(255);
-
-            buffer[idx] = (out_a_byte << 24) | (out_r << 16) | (out_g << 8) | out_b;
-        }
-    }
-}
-
-/// Software rasterizer for Scheme C1 Concentric Dual Rings (outer 5h, inner 7d, central logo).
+/// Software rasterizer for Scheme C1 Concentric Dual Rings (outer 5h, inner 7d, clean minimalist center).
 pub fn rasterize_concentric_ring(
     buffer: &mut [u32],
     buf_w: i32,
@@ -267,7 +132,7 @@ pub fn rasterize_concentric_ring(
     cy: f32,
     p5h: f32,
     p7d: f32,
-    kind: ModelKind,
+    _kind: ModelKind,
     c5h_rgb: (u8, u8, u8),
     c7d_rgb: (u8, u8, u8),
     is_dark: bool,
@@ -381,16 +246,6 @@ pub fn rasterize_concentric_ring(
 
             buffer[idx] = 0xFF000000 | (out_r << 16) | (out_g << 8) | out_b;
         }
-    }
-
-    match kind {
-        ModelKind::Codex => {
-            rasterize_openai_logo(buffer, buf_w, buf_h, cx, cy, is_dark, dpi_scale);
-        }
-        ModelKind::Antigravity => {
-            rasterize_google_logo(buffer, buf_w, buf_h, cx, cy, dpi_scale);
-        }
-        ModelKind::ClaudeCode => {}
     }
 }
 
@@ -520,17 +375,27 @@ mod tests {
     }
 
     #[test]
-    fn test_resolve_model_colors_amber_7d() {
-        let (codex_5h, codex_7d) = resolve_model_colors(ModelKind::Codex, 50.0, 50.0);
+    fn test_resolve_model_colors_colorful_and_monochrome() {
+        // Colorful mode
+        let (codex_5h, codex_7d) = resolve_model_colors(ModelKind::Codex, ColorMode::Colorful, false, 50.0, 50.0);
         assert_eq!(codex_5h, (16, 185, 129));
-        assert_eq!(codex_7d, (245, 158, 11)); // Amber 7d aligned
+        assert_eq!(codex_7d, (245, 158, 11));
 
-        let (agy_5h, agy_7d) = resolve_model_colors(ModelKind::Antigravity, 50.0, 50.0);
+        let (agy_5h, agy_7d) = resolve_model_colors(ModelKind::Antigravity, ColorMode::Colorful, false, 50.0, 50.0);
         assert_eq!(agy_5h, (59, 130, 246));
-        assert_eq!(agy_7d, (245, 158, 11)); // Amber 7d aligned
+        assert_eq!(agy_7d, (245, 158, 11));
 
         // Low remaining threshold (used >= 80% means remaining <= 20%) -> warning red
-        let (c5h_warn, _) = resolve_model_colors(ModelKind::Codex, 85.0, 50.0);
+        let (c5h_warn, _) = resolve_model_colors(ModelKind::Codex, ColorMode::Colorful, false, 85.0, 50.0);
         assert_eq!(c5h_warn, (239, 68, 68));
+
+        // Monochrome mode (dark vs light)
+        let (dark_5h, dark_7d) = resolve_model_colors(ModelKind::Codex, ColorMode::Monochrome, true, 50.0, 50.0);
+        assert_eq!(dark_5h, (255, 255, 255));
+        assert_eq!(dark_7d, (160, 174, 192));
+
+        let (light_5h, light_7d) = resolve_model_colors(ModelKind::Codex, ColorMode::Monochrome, false, 50.0, 50.0);
+        assert_eq!(light_5h, (30, 41, 59));
+        assert_eq!(light_7d, (100, 116, 139));
     }
 }
