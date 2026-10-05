@@ -4539,4 +4539,30 @@ mod tests {
         assert_eq!(alerts.len(), 2);
         assert_eq!(notified.len(), 1);
     }
+
+    #[test]
+    fn concentric_capsule_geometry_and_colors() {
+        assert_eq!(total_widget_width_for(1, LanguageId::English, TextFormat::default()), 140);
+        assert_eq!(total_widget_width_for(2, LanguageId::English, TextFormat::default()), 263);
+
+        let (pct, time) = parse_display_parts("100% · 21:00");
+        assert_eq!(pct, "100%");
+        assert_eq!(time, "21:00");
+
+        let (pct, time) = parse_display_parts("86% · 10/12");
+        assert_eq!(pct, "86%");
+        assert_eq!(time, "10/12");
+
+        let (pct, time) = parse_display_parts("--");
+        assert_eq!(pct, "--");
+        assert_eq!(time, "");
+
+        let (codex_5h, codex_7d) = resolve_model_colors(ModelKind::Codex, 50.0, 50.0);
+        assert_eq!(codex_5h, (16, 185, 129));
+        assert_eq!(codex_7d, (245, 158, 11));
+
+        let (agy_5h, agy_7d) = resolve_model_colors(ModelKind::Antigravity, 50.0, 50.0);
+        assert_eq!(agy_5h, (59, 130, 246));
+        assert_eq!(agy_7d, (245, 158, 11));
+    }
 }
