@@ -19,7 +19,7 @@ use windows::Win32::UI::WindowsAndMessaging::*;
 
 use crate::diagnose;
 use crate::localization::{self, LanguageId, Strings};
-use crate::models::AppUsageData;
+use crate::models::{AppUsageData, BarStyle, ColorTheme, TextFormat};
 use crate::native_interop::{
     self, Color, TIMER_COUNTDOWN, TIMER_POLL, TIMER_RESET_POLL, TIMER_UPDATE_CHECK, WM_APP_TRAY,
     WM_APP_USAGE_UPDATED,
@@ -97,6 +97,9 @@ struct AppState {
     drag_start_offset: i32,
 
     widget_visible: bool,
+    bar_style: BarStyle,
+    color_theme: ColorTheme,
+    text_format: TextFormat,
 }
 
 #[derive(Clone, Debug)]
@@ -144,6 +147,22 @@ const IDM_ALERT_OFF: u16 = 80;
 const IDM_ALERT_10: u16 = 81;
 const IDM_ALERT_20: u16 = 82;
 const IDM_ALERT_30: u16 = 83;
+
+// Bar style
+const IDM_STYLE_SEGMENTED: u16 = 90;
+const IDM_STYLE_PILL: u16 = 91;
+
+// Color theme
+const IDM_THEME_EMERALD: u16 = 100;
+const IDM_THEME_CORAL: u16 = 101;
+const IDM_THEME_CYAN: u16 = 102;
+const IDM_THEME_DYNAMIC: u16 = 103;
+const IDM_THEME_MONOCHROME: u16 = 104;
+
+// Text format
+const IDM_TEXT_COMPACT: u16 = 110;
+const IDM_TEXT_VERBOSE: u16 = 111;
+const IDM_TEXT_COUNTDOWN: u16 = 112;
 
 const WM_DPICHANGED_MSG: u32 = 0x02E0;
 const WM_APP_UPDATE_CHECK_COMPLETE: u32 = WM_APP + 2;
@@ -346,6 +365,12 @@ struct SettingsFile {
     alert_threshold_percent: u8,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     notified_quota_windows: Vec<String>,
+    #[serde(default)]
+    bar_style: BarStyle,
+    #[serde(default)]
+    color_theme: ColorTheme,
+    #[serde(default)]
+    text_format: TextFormat,
 }
 
 impl Default for SettingsFile {
@@ -364,6 +389,9 @@ impl Default for SettingsFile {
             show_weekly_window: true,
             alert_threshold_percent: 0,
             notified_quota_windows: Vec::new(),
+            bar_style: BarStyle::default(),
+            color_theme: ColorTheme::default(),
+            text_format: TextFormat::default(),
         }
     }
 }
@@ -490,6 +518,9 @@ fn save_state_settings() {
             show_weekly_window: s.show_weekly_window,
             alert_threshold_percent: s.alert_threshold_percent,
             notified_quota_windows: s.notified_quota_windows.iter().cloned().collect(),
+            bar_style: s.bar_style,
+            color_theme: s.color_theme,
+            text_format: s.text_format,
         });
     }
 }
@@ -919,22 +950,25 @@ fn refresh_usage_texts(state: &mut AppState) {
 
     let strings = state.language.strings();
     let show_remaining = state.language == LanguageId::SimplifiedChinese;
+    let text_format = state.text_format;
     let Some(data) = state.data.as_ref() else {
         return;
     };
 
     if let Some(claude_code) = data.claude_code.as_ref() {
-        state.session_text = poller::format_line(
+        state.session_text = poller::format_line_with_format(
             &claude_code.session,
             strings,
             show_remaining,
             poller::UsageWindowKind::Session,
+            text_format,
         );
-        state.weekly_text = poller::format_line(
+        state.weekly_text = poller::format_line_with_format(
             &claude_code.weekly,
             strings,
             show_remaining,
             poller::UsageWindowKind::Weekly,
+            text_format,
         );
     } else if state.show_claude_code {
         state.session_text = "!".to_string();
@@ -942,17 +976,19 @@ fn refresh_usage_texts(state: &mut AppState) {
     }
 
     if let Some(codex) = data.codex.as_ref() {
-        state.codex_session_text = poller::format_line(
+        state.codex_session_text = poller::format_line_with_format(
             &codex.session,
             strings,
             show_remaining,
             poller::UsageWindowKind::Session,
+            text_format,
         );
-        state.codex_weekly_text = poller::format_line(
+        state.codex_weekly_text = poller::format_line_with_format(
             &codex.weekly,
             strings,
             show_remaining,
             poller::UsageWindowKind::Weekly,
+            text_format,
         );
     } else if state.show_codex {
         state.codex_session_text = "!".to_string();
@@ -960,21 +996,23 @@ fn refresh_usage_texts(state: &mut AppState) {
     }
 
     if let Some(antigravity) = data.antigravity.as_ref() {
-        state.antigravity_session_text = poller::format_line(
+        state.antigravity_session_text = poller::format_line_with_format(
             &antigravity.session,
             strings,
             show_remaining,
             poller::UsageWindowKind::Session,
+            text_format,
         );
         state.antigravity_weekly_text =
             if antigravity.weekly.resets_at.is_none() && antigravity.weekly.percentage == 0.0 {
                 "--".to_string()
             } else {
-                poller::format_line(
+                poller::format_line_with_format(
                     &antigravity.weekly,
                     strings,
                     show_remaining,
                     poller::UsageWindowKind::Weekly,
+                    text_format,
                 )
             };
     } else if state.show_antigravity {
@@ -1405,11 +1443,12 @@ fn set_startup_enabled(enable: bool) {
     }
 }
 
-// Dimensions matching the C# version
+// Dimensions matching the aesthetic 10-block segmented style
 const SEGMENT_W: i32 = 10;
 const SEGMENT_H: i32 = 13;
-const SEGMENT_GAP: i32 = 1;
+const SEGMENT_GAP: i32 = 2;
 const SEGMENT_COUNT: i32 = 10;
+const CORNER_RADIUS: i32 = 2;
 
 const LEFT_DIVIDER_W: i32 = 3;
 const DIVIDER_RIGHT_MARGIN: i32 = 10;
@@ -1427,7 +1466,7 @@ fn is_drag_handle_point(client_x: i32, client_y: i32) -> bool {
     let divider_h = sc(25);
     let divider_top = (sc(WIDGET_HEIGHT) - divider_h) / 2;
     client_x >= 0
-        && client_x < sc(LEFT_DIVIDER_W)
+        && client_x < sc(LEFT_DIVIDER_W + 5)
         && client_y >= divider_top
         && client_y < divider_top + divider_h
 }
@@ -1454,15 +1493,24 @@ fn row_bar_segment_count(active_models: i32) -> i32 {
     }
 }
 
-fn usage_layout_widths(language: LanguageId) -> (i32, i32) {
-    if language == LanguageId::SimplifiedChinese {
-        (
-            SIMPLIFIED_CHINESE_LABEL_WIDTH,
-            SIMPLIFIED_CHINESE_TEXT_WIDTH,
-        )
+fn usage_layout_widths(language: LanguageId, text_format: TextFormat) -> (i32, i32) {
+    let label_width = if language == LanguageId::SimplifiedChinese {
+        SIMPLIFIED_CHINESE_LABEL_WIDTH
     } else {
-        (LABEL_WIDTH, TEXT_WIDTH)
-    }
+        LABEL_WIDTH
+    };
+    let text_width = match text_format {
+        TextFormat::Compact => 76,
+        TextFormat::Countdown => 62,
+        TextFormat::Verbose => {
+            if language == LanguageId::SimplifiedChinese {
+                SIMPLIFIED_CHINESE_TEXT_WIDTH
+            } else {
+                TEXT_WIDTH
+            }
+        }
+    };
+    (label_width, text_width)
 }
 
 fn usage_percent_for_display(language: LanguageId, used_percentage: f64) -> f64 {
@@ -1473,9 +1521,13 @@ fn usage_percent_for_display(language: LanguageId, used_percentage: f64) -> f64 
     }
 }
 
-fn total_widget_width_for(active_models: i32, language: LanguageId) -> i32 {
+fn total_widget_width_for(
+    active_models: i32,
+    language: LanguageId,
+    text_format: TextFormat,
+) -> i32 {
     let bar_segments = row_bar_segment_count(active_models);
-    let (label_width, text_width) = usage_layout_widths(language);
+    let (label_width, text_width) = usage_layout_widths(language, text_format);
     let model_width = (sc(SEGMENT_W) + sc(SEGMENT_GAP)) * bar_segments - sc(SEGMENT_GAP)
         + sc(BAR_RIGHT_MARGIN)
         + sc(text_width);
@@ -1497,11 +1549,12 @@ fn total_widget_width_for_state(state: &AppState) -> i32 {
             state.show_antigravity,
         ),
         state.language,
+        state.text_format,
     )
 }
 
 fn total_widget_width() -> i32 {
-    let (active_models, language) = {
+    let (active_models, language, text_format) = {
         let state = lock_state();
         state
             .as_ref()
@@ -1509,11 +1562,12 @@ fn total_widget_width() -> i32 {
                 (
                     active_model_count(s.show_claude_code, s.show_codex, s.show_antigravity),
                     s.language,
+                    s.text_format,
                 )
             })
-            .unwrap_or((1, LanguageId::English))
+            .unwrap_or((1, LanguageId::English, TextFormat::default()))
     };
-    total_widget_width_for(active_models, language)
+    total_widget_width_for(active_models, language, text_format)
 }
 
 fn claude_accent_color() -> Color {
@@ -1525,6 +1579,25 @@ fn codex_accent_color(is_dark: bool) -> Color {
         Color::from_hex("#F5F5F5")
     } else {
         Color::from_hex("#1F1F1F")
+    }
+}
+
+fn resolve_codex_accent(theme: ColorTheme, percent: f64, is_dark: bool) -> Color {
+    match theme {
+        ColorTheme::Emerald => Color::from_hex("#10A37F"),
+        ColorTheme::Coral => Color::from_hex("#D97757"),
+        ColorTheme::Cyan => Color::from_hex("#00B4D8"),
+        ColorTheme::Dynamic => {
+            let p = percent.clamp(0.0, 100.0);
+            if p >= 40.0 {
+                Color::from_hex("#10B981")
+            } else if p >= 20.0 {
+                Color::from_hex("#F59E0B")
+            } else {
+                Color::from_hex("#EF4444")
+            }
+        }
+        ColorTheme::Monochrome => codex_accent_color(is_dark),
     }
 }
 
@@ -1646,7 +1719,7 @@ pub fn run() {
             WS_POPUP,
             0,
             0,
-            total_widget_width_for(initial_model_count, language),
+            total_widget_width_for(initial_model_count, language, settings.text_format),
             sc(WIDGET_HEIGHT),
             HWND::default(),
             HMENU::default(),
@@ -1726,6 +1799,9 @@ pub fn run() {
                 drag_start_client_x: 0,
                 drag_start_offset: 0,
                 widget_visible: settings.widget_visible,
+                bar_style: settings.bar_style,
+                color_theme: settings.color_theme,
+                text_format: settings.text_format,
             });
         }
 
@@ -1837,6 +1913,9 @@ fn render_layered() {
         show_antigravity,
         show_session_window,
         show_weekly_window,
+        bar_style,
+        color_theme,
+        text_format,
     ) = {
         let state = lock_state();
         match state.as_ref() {
@@ -1863,6 +1942,9 @@ fn render_layered() {
                 s.show_antigravity,
                 s.show_session_window,
                 s.show_weekly_window,
+                s.bar_style,
+                s.color_theme,
+                s.text_format,
             ),
             None => return,
         }
@@ -1882,7 +1964,6 @@ fn render_layered() {
     let height = sc(WIDGET_HEIGHT);
 
     let accent = claude_accent_color();
-    let codex_accent = codex_accent_color(is_dark);
     let antigravity_accent = antigravity_accent_color();
     let track = if is_dark {
         Color::from_hex("#444444")
@@ -1961,8 +2042,10 @@ fn render_layered() {
             show_antigravity,
             show_session_window,
             show_weekly_window,
-            &codex_accent,
             &antigravity_accent,
+            bar_style,
+            color_theme,
+            text_format,
         );
 
         // Background pixels → alpha 1 (nearly invisible but still hittable for right-click).
@@ -2040,8 +2123,10 @@ fn paint_content(
     show_antigravity: bool,
     show_session_window: bool,
     show_weekly_window: bool,
-    codex_accent: &Color,
     antigravity_accent: &Color,
+    bar_style: BarStyle,
+    color_theme: ColorTheme,
+    text_format: TextFormat,
 ) {
     unsafe {
         let session_pct = usage_percent_for_display(language, session_pct);
@@ -2050,7 +2135,10 @@ fn paint_content(
         let codex_weekly_pct = usage_percent_for_display(language, codex_weekly_pct);
         let antigravity_session_pct = usage_percent_for_display(language, antigravity_session_pct);
         let antigravity_weekly_pct = usage_percent_for_display(language, antigravity_weekly_pct);
-        let (label_width, text_width) = usage_layout_widths(language);
+        let (label_width, text_width) = usage_layout_widths(language, text_format);
+
+        let codex_session_accent = resolve_codex_accent(color_theme, codex_session_pct, is_dark);
+        let codex_weekly_accent = resolve_codex_accent(color_theme, codex_weekly_pct, is_dark);
 
         let client_rect = RECT {
             left: 0,
@@ -2149,11 +2237,12 @@ fn paint_content(
                 show_codex,
                 show_antigravity,
                 accent,
-                codex_accent,
+                &codex_session_accent,
                 antigravity_accent,
                 track,
                 label_width,
                 text_width,
+                bar_style,
             );
         }
         if show_weekly_window {
@@ -2178,11 +2267,12 @@ fn paint_content(
                 show_codex,
                 show_antigravity,
                 accent,
-                codex_accent,
+                &codex_weekly_accent,
                 antigravity_accent,
                 track,
                 label_width,
                 text_width,
+                bar_style,
             );
         }
 
@@ -3219,6 +3309,55 @@ unsafe extern "system" fn wnd_proc(
                     save_state_settings();
                     render_layered();
                 }
+                IDM_STYLE_SEGMENTED | IDM_STYLE_PILL => {
+                    {
+                        let mut state = lock_state();
+                        if let Some(s) = state.as_mut() {
+                            s.bar_style = match id {
+                                IDM_STYLE_PILL => BarStyle::Pill,
+                                _ => BarStyle::Segmented,
+                            };
+                        }
+                    }
+                    save_state_settings();
+                    render_layered();
+                }
+                IDM_THEME_EMERALD
+                | IDM_THEME_CORAL
+                | IDM_THEME_CYAN
+                | IDM_THEME_DYNAMIC
+                | IDM_THEME_MONOCHROME => {
+                    {
+                        let mut state = lock_state();
+                        if let Some(s) = state.as_mut() {
+                            s.color_theme = match id {
+                                IDM_THEME_CORAL => ColorTheme::Coral,
+                                IDM_THEME_CYAN => ColorTheme::Cyan,
+                                IDM_THEME_DYNAMIC => ColorTheme::Dynamic,
+                                IDM_THEME_MONOCHROME => ColorTheme::Monochrome,
+                                _ => ColorTheme::Emerald,
+                            };
+                        }
+                    }
+                    save_state_settings();
+                    render_layered();
+                }
+                IDM_TEXT_COMPACT | IDM_TEXT_VERBOSE | IDM_TEXT_COUNTDOWN => {
+                    {
+                        let mut state = lock_state();
+                        if let Some(s) = state.as_mut() {
+                            s.text_format = match id {
+                                IDM_TEXT_VERBOSE => TextFormat::Verbose,
+                                IDM_TEXT_COUNTDOWN => TextFormat::Countdown,
+                                _ => TextFormat::Compact,
+                            };
+                            refresh_usage_texts(s);
+                        }
+                    }
+                    save_state_settings();
+                    position_at_taskbar();
+                    render_layered();
+                }
                 id if id == tray_icon::IDM_TOGGLE_WIDGET => {
                     toggle_widget_visibility(hwnd);
                 }
@@ -3271,6 +3410,9 @@ fn show_context_menu(hwnd: HWND) {
             show_session_window,
             show_weekly_window,
             alert_threshold_percent,
+            bar_style,
+            color_theme,
+            text_format,
         ) = {
             let state = lock_state();
             match state.as_ref() {
@@ -3289,6 +3431,9 @@ fn show_context_menu(hwnd: HWND) {
                     s.show_session_window,
                     s.show_weekly_window,
                     s.alert_threshold_percent,
+                    s.bar_style,
+                    s.color_theme,
+                    s.text_format,
                 ),
                 None => (
                     POLL_15_MIN,
@@ -3305,6 +3450,9 @@ fn show_context_menu(hwnd: HWND) {
                     true,
                     true,
                     0,
+                    BarStyle::default(),
+                    ColorTheme::default(),
+                    TextFormat::default(),
                 ),
             }
         };
@@ -3515,6 +3663,198 @@ fn show_context_menu(hwnd: HWND) {
             PCWSTR::from_raw(alert_label.as_ptr()),
         );
 
+        // Appearance submenu
+        let appearance_menu = CreatePopupMenu().unwrap();
+        let is_zh = language == LanguageId::SimplifiedChinese;
+
+        // 1. Bar Style submenu
+        let style_menu = CreatePopupMenu().unwrap();
+        let seg_label = native_interop::wide_str(if is_zh {
+            "分段方块 (10格)"
+        } else {
+            "Segmented (10 blocks)"
+        });
+        let pill_label = native_interop::wide_str(if is_zh {
+            "平滑胶囊"
+        } else {
+            "Continuous Pill"
+        });
+        let _ = AppendMenuW(
+            style_menu,
+            if bar_style == BarStyle::Segmented {
+                MF_CHECKED
+            } else {
+                MENU_ITEM_FLAGS(0)
+            },
+            IDM_STYLE_SEGMENTED as usize,
+            PCWSTR::from_raw(seg_label.as_ptr()),
+        );
+        let _ = AppendMenuW(
+            style_menu,
+            if bar_style == BarStyle::Pill {
+                MF_CHECKED
+            } else {
+                MENU_ITEM_FLAGS(0)
+            },
+            IDM_STYLE_PILL as usize,
+            PCWSTR::from_raw(pill_label.as_ptr()),
+        );
+        let style_title = native_interop::wide_str(if is_zh {
+            "进度条样式"
+        } else {
+            "Bar style"
+        });
+        let _ = AppendMenuW(
+            appearance_menu,
+            MF_POPUP,
+            style_menu.0 as usize,
+            PCWSTR::from_raw(style_title.as_ptr()),
+        );
+
+        // 2. Color Theme submenu
+        let theme_menu = CreatePopupMenu().unwrap();
+        let theme_items = [
+            (
+                IDM_THEME_EMERALD,
+                ColorTheme::Emerald,
+                if is_zh {
+                    "科技翡翠绿 (OpenAI)"
+                } else {
+                    "Emerald Green (OpenAI)"
+                },
+            ),
+            (
+                IDM_THEME_CORAL,
+                ColorTheme::Coral,
+                if is_zh {
+                    "暖珊瑚橙 (Claude)"
+                } else {
+                    "Warm Coral (Claude)"
+                },
+            ),
+            (
+                IDM_THEME_CYAN,
+                ColorTheme::Cyan,
+                if is_zh {
+                    "极客青蓝"
+                } else {
+                    "Cyber Cyan"
+                },
+            ),
+            (
+                IDM_THEME_DYNAMIC,
+                ColorTheme::Dynamic,
+                if is_zh {
+                    "动态电量 (绿/黄/红)"
+                } else {
+                    "Dynamic Status"
+                },
+            ),
+            (
+                IDM_THEME_MONOCHROME,
+                ColorTheme::Monochrome,
+                if is_zh {
+                    "极简单色"
+                } else {
+                    "Monochrome"
+                },
+            ),
+        ];
+        for (id, thm, label) in theme_items {
+            let label_str = native_interop::wide_str(label);
+            let flags = if color_theme == thm {
+                MF_CHECKED
+            } else {
+                MENU_ITEM_FLAGS(0)
+            };
+            let _ = AppendMenuW(
+                theme_menu,
+                flags,
+                id as usize,
+                PCWSTR::from_raw(label_str.as_ptr()),
+            );
+        }
+        let theme_title = native_interop::wide_str(if is_zh {
+            "色彩主题"
+        } else {
+            "Color theme"
+        });
+        let _ = AppendMenuW(
+            appearance_menu,
+            MF_POPUP,
+            theme_menu.0 as usize,
+            PCWSTR::from_raw(theme_title.as_ptr()),
+        );
+
+        // 3. Text Format submenu
+        let fmt_menu = CreatePopupMenu().unwrap();
+        let fmt_items = [
+            (
+                IDM_TEXT_COMPACT,
+                TextFormat::Compact,
+                if is_zh {
+                    "紧凑模式 (65% · 14:59)"
+                } else {
+                    "Compact (65% · 14:59)"
+                },
+            ),
+            (
+                IDM_TEXT_VERBOSE,
+                TextFormat::Verbose,
+                if is_zh {
+                    "详细模式 (剩余65% 14:59重置)"
+                } else {
+                    "Verbose"
+                },
+            ),
+            (
+                IDM_TEXT_COUNTDOWN,
+                TextFormat::Countdown,
+                if is_zh {
+                    "倒计时模式 (65% · 3h)"
+                } else {
+                    "Countdown (65% · 3h)"
+                },
+            ),
+        ];
+        for (id, fmt, label) in fmt_items {
+            let label_str = native_interop::wide_str(label);
+            let flags = if text_format == fmt {
+                MF_CHECKED
+            } else {
+                MENU_ITEM_FLAGS(0)
+            };
+            let _ = AppendMenuW(
+                fmt_menu,
+                flags,
+                id as usize,
+                PCWSTR::from_raw(label_str.as_ptr()),
+            );
+        }
+        let fmt_title = native_interop::wide_str(if is_zh {
+            "文本排版"
+        } else {
+            "Text layout"
+        });
+        let _ = AppendMenuW(
+            appearance_menu,
+            MF_POPUP,
+            fmt_menu.0 as usize,
+            PCWSTR::from_raw(fmt_title.as_ptr()),
+        );
+
+        let appearance_title = native_interop::wide_str(if is_zh {
+            "外观样式"
+        } else {
+            "Appearance"
+        });
+        let _ = AppendMenuW(
+            menu,
+            MF_POPUP,
+            appearance_menu.0 as usize,
+            PCWSTR::from_raw(appearance_title.as_ptr()),
+        );
+
         // Settings submenu
         let settings_menu = CreatePopupMenu().unwrap();
 
@@ -3671,6 +4011,9 @@ fn paint(hdc: HDC, hwnd: HWND) {
         show_antigravity,
         show_session_window,
         show_weekly_window,
+        bar_style,
+        color_theme,
+        text_format,
     ) = {
         let state = lock_state();
         match state.as_ref() {
@@ -3695,13 +4038,15 @@ fn paint(hdc: HDC, hwnd: HWND) {
                 s.show_antigravity,
                 s.show_session_window,
                 s.show_weekly_window,
+                s.bar_style,
+                s.color_theme,
+                s.text_format,
             ),
             None => return,
         }
     };
 
     let accent = claude_accent_color();
-    let codex_accent = codex_accent_color(is_dark);
     let antigravity_accent = antigravity_accent_color();
     let track = if is_dark {
         Color::from_hex("#444444")
@@ -3761,8 +4106,10 @@ fn paint(hdc: HDC, hwnd: HWND) {
             show_antigravity,
             show_session_window,
             show_weekly_window,
-            &codex_accent,
             &antigravity_accent,
+            bar_style,
+            color_theme,
+            text_format,
         );
 
         let _ = BitBlt(hdc, 0, 0, width, height, mem_dc, 0, 0, SRCCOPY);
@@ -3795,6 +4142,7 @@ fn draw_row(
     track: &Color,
     label_width: i32,
     text_width: i32,
+    bar_style: BarStyle,
 ) {
     let seg_h = sc(SEGMENT_H);
     let active_models = active_model_count(show_claude_code, show_codex, show_antigravity);
@@ -3805,10 +4153,15 @@ fn draw_row(
     } else {
         *text_color
     };
+    let default_value_color = if is_dark {
+        Color::from_hex("#E2E8F0")
+    } else {
+        Color::from_hex("#1E293B")
+    };
     let codex_value_color = if use_model_text_colors {
         codex_usage_text_color(is_dark)
     } else {
-        *text_color
+        default_value_color
     };
     let antigravity_value_color = if use_model_text_colors {
         antigravity_usage_text_color(is_dark)
@@ -3845,6 +4198,7 @@ fn draw_row(
                 track,
                 &claude_value_color,
                 text_width,
+                bar_style,
             );
             model_x += model_usage_width(segment_count, text_width) + sc(MODEL_RIGHT_MARGIN);
         }
@@ -3860,6 +4214,7 @@ fn draw_row(
                 track,
                 &codex_value_color,
                 text_width,
+                bar_style,
             );
             model_x += model_usage_width(segment_count, text_width) + sc(MODEL_RIGHT_MARGIN);
         }
@@ -3875,6 +4230,7 @@ fn draw_row(
                 track,
                 &antigravity_value_color,
                 text_width,
+                bar_style,
             );
         }
     }
@@ -3897,45 +4253,100 @@ fn draw_usage_bar(
     track: &Color,
     text_color: &Color,
     text_width: i32,
+    bar_style: BarStyle,
 ) {
     let seg_w = sc(SEGMENT_W);
     let seg_h = sc(SEGMENT_H);
     let seg_gap = sc(SEGMENT_GAP);
     let bar_width = segment_count * (seg_w + seg_gap) - seg_gap;
-    let corner_r = seg_h / 2;
 
     unsafe {
         let percent_clamped = percent.clamp(0.0, 100.0);
-        let bar_rect = RECT {
-            left: bar_x,
-            top: y,
-            right: bar_x + bar_width,
-            bottom: y + seg_h,
-        };
-        draw_rounded_rect(hdc, &bar_rect, track, corner_r);
 
-        let fill_width = (bar_width as f64 * percent_clamped / 100.0).round() as i32;
-        if fill_width > 0 {
-            let fill_rect = RECT {
-                left: bar_x,
-                top: y,
-                right: bar_x + fill_width,
-                bottom: y + seg_h,
-            };
-            let rgn = CreateRoundRectRgn(
-                bar_rect.left,
-                bar_rect.top,
-                bar_rect.right + 1,
-                bar_rect.bottom + 1,
-                corner_r * 2,
-                corner_r * 2,
-            );
-            let _ = SelectClipRgn(hdc, rgn);
-            let brush = CreateSolidBrush(COLORREF(accent.to_colorref()));
-            FillRect(hdc, &fill_rect, brush);
-            let _ = DeleteObject(brush);
-            let _ = SelectClipRgn(hdc, HRGN::default());
-            let _ = DeleteObject(rgn);
+        match bar_style {
+            BarStyle::Segmented => {
+                let corner_r = sc(CORNER_RADIUS);
+                let segment_percent = 100.0 / segment_count as f64;
+
+                for i in 0..segment_count {
+                    let seg_x = bar_x + i * (seg_w + seg_gap);
+                    let seg_start = (i as f64) * segment_percent;
+                    let seg_end = seg_start + segment_percent;
+
+                    let seg_rect = RECT {
+                        left: seg_x,
+                        top: y,
+                        right: seg_x + seg_w,
+                        bottom: y + seg_h,
+                    };
+
+                    if percent_clamped >= seg_end {
+                        draw_rounded_rect(hdc, &seg_rect, accent, corner_r);
+                    } else if percent_clamped <= seg_start {
+                        draw_rounded_rect(hdc, &seg_rect, track, corner_r);
+                    } else {
+                        draw_rounded_rect(hdc, &seg_rect, track, corner_r);
+                        let fraction = (percent_clamped - seg_start) / segment_percent;
+                        let fill_width = (seg_w as f64 * fraction).round() as i32;
+                        if fill_width > 0 {
+                            let fill_rect = RECT {
+                                left: seg_x,
+                                top: y,
+                                right: seg_x + fill_width,
+                                bottom: y + seg_h,
+                            };
+                            let rgn = CreateRoundRectRgn(
+                                seg_rect.left,
+                                seg_rect.top,
+                                seg_rect.right + 1,
+                                seg_rect.bottom + 1,
+                                corner_r * 2,
+                                corner_r * 2,
+                            );
+                            let _ = SelectClipRgn(hdc, rgn);
+                            let brush = CreateSolidBrush(COLORREF(accent.to_colorref()));
+                            FillRect(hdc, &fill_rect, brush);
+                            let _ = DeleteObject(brush);
+                            let _ = SelectClipRgn(hdc, HRGN::default());
+                            let _ = DeleteObject(rgn);
+                        }
+                    }
+                }
+            }
+            BarStyle::Pill => {
+                let corner_r = seg_h / 2;
+                let bar_rect = RECT {
+                    left: bar_x,
+                    top: y,
+                    right: bar_x + bar_width,
+                    bottom: y + seg_h,
+                };
+                draw_rounded_rect(hdc, &bar_rect, track, corner_r);
+
+                let fill_width = (bar_width as f64 * percent_clamped / 100.0).round() as i32;
+                if fill_width > 0 {
+                    let fill_rect = RECT {
+                        left: bar_x,
+                        top: y,
+                        right: bar_x + fill_width,
+                        bottom: y + seg_h,
+                    };
+                    let rgn = CreateRoundRectRgn(
+                        bar_rect.left,
+                        bar_rect.top,
+                        bar_rect.right + 1,
+                        bar_rect.bottom + 1,
+                        corner_r * 2,
+                        corner_r * 2,
+                    );
+                    let _ = SelectClipRgn(hdc, rgn);
+                    let brush = CreateSolidBrush(COLORREF(accent.to_colorref()));
+                    FillRect(hdc, &fill_rect, brush);
+                    let _ = DeleteObject(brush);
+                    let _ = SelectClipRgn(hdc, HRGN::default());
+                    let _ = DeleteObject(rgn);
+                }
+            }
         }
 
         let text_x = bar_x + bar_width + sc(BAR_RIGHT_MARGIN);

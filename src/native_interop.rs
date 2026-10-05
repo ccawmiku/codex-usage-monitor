@@ -51,6 +51,7 @@ pub fn system_time_to_local(value: SystemTime) -> Option<SYSTEMTIME> {
 pub struct TaskbarWindow {
     pub hwnd: HWND,
     pub rect: RECT,
+    pub is_secondary: bool,
 }
 
 pub fn find_taskbars() -> Vec<TaskbarWindow> {
@@ -62,7 +63,12 @@ pub fn find_taskbars() -> Vec<TaskbarWindow> {
             let class_name = String::from_utf16_lossy(&class_name[..len as usize]);
             if class_name == "Shell_TrayWnd" || class_name == "Shell_SecondaryTrayWnd" {
                 if let Some(rect) = get_taskbar_rect(hwnd).or_else(|| get_window_rect_safe(hwnd)) {
-                    taskbars.push(TaskbarWindow { hwnd, rect });
+                    let is_secondary = class_name == "Shell_SecondaryTrayWnd";
+                    taskbars.push(TaskbarWindow {
+                        hwnd,
+                        rect,
+                        is_secondary,
+                    });
                 }
             }
         }
@@ -75,6 +81,7 @@ pub fn find_taskbars() -> Vec<TaskbarWindow> {
     }
     taskbars.sort_by_key(|taskbar| {
         (
+            taskbar.is_secondary,
             taskbar.rect.top,
             taskbar.rect.left,
             taskbar.rect.bottom,

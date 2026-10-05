@@ -11,7 +11,7 @@ use std::os::windows::process::CommandExt;
 
 use crate::diagnose;
 use crate::localization::Strings;
-use crate::models::{AppUsageData, UsageData, UsageSection};
+use crate::models::{AppUsageData, TextFormat, UsageData, UsageSection};
 use crate::native_interop;
 
 const USAGE_URL: &str = "https://api.anthropic.com/api/oauth/usage";
@@ -1609,33 +1609,82 @@ fn is_leap(y: u64) -> bool {
     (y % 4 == 0 && y % 100 != 0) || y % 400 == 0
 }
 
-/// Format a usage section for the compact taskbar display.
+#[allow(dead_code)]
 pub fn format_line(
     section: &UsageSection,
     strings: Strings,
     show_remaining_in_chinese: bool,
     window: UsageWindowKind,
 ) -> String {
-    if show_remaining_in_chinese {
-        return format_simplified_chinese_line(section, window);
-    }
-
-    let pct = format!("{:.0}%", section.percentage);
-    let cd = format_countdown(section.resets_at, strings);
-    if cd.is_empty() {
-        pct
-    } else {
-        format!("{pct} \u{00b7} {cd}")
-    }
+    format_line_with_format(
+        section,
+        strings,
+        show_remaining_in_chinese,
+        window,
+        if show_remaining_in_chinese {
+            TextFormat::Verbose
+        } else {
+            TextFormat::Countdown
+        },
+    )
 }
 
-fn format_simplified_chinese_line(section: &UsageSection, window: UsageWindowKind) -> String {
+/// Format a usage section according to user's TextFormat preference.
+pub fn format_line_with_format(
+    section: &UsageSection,
+    strings: Strings,
+    show_remaining: bool,
+    window: UsageWindowKind,
+    format: TextFormat,
+) -> String {
     let remaining = remaining_percentage(section.percentage);
     let reset = section
         .resets_at
         .and_then(native_interop::system_time_to_local);
-    format_simplified_chinese_values(remaining, reset, window)
+
+    match format {
+        TextFormat::Compact => {
+            let pct_val = if show_remaining { remaining } else { section.percentage };
+            let pct = format!("{pct_val:.0}%");
+            if let Some(reset) = reset {
+                match window {
+                    UsageWindowKind::Session => {
+                        format!("{pct} \u{00b7} {:02}:{:02}", reset.wHour, reset.wMinute)
+                    }
+                    UsageWindowKind::Weekly => {
+                        format!("{pct} \u{00b7} {:02}/{:02}", reset.wMonth, reset.wDay)
+                    }
+                }
+            } else {
+                pct
+            }
+        }
+        TextFormat::Countdown => {
+            let pct_val = if show_remaining { remaining } else { section.percentage };
+            let pct = format!("{pct_val:.0}%");
+            let cd = format_countdown(section.resets_at, strings);
+            if cd.is_empty() {
+                pct
+            } else {
+                format!("{pct} \u{00b7} {cd}")
+            }
+        }
+        TextFormat::Verbose => {
+            if show_remaining {
+                format_simplified_chinese_values(remaining, reset, window)
+            } else {
+                let pct = format!("{:.0}%", section.percentage);
+                let cd = format_countdown(section.resets_at, strings);
+                if cd.is_empty() {
+                    pct
+                } else {
+                    format!("{pct} \u{00b7} {cd}")
+                }
+            }
+        }
+    }
 }
+
 
 fn format_simplified_chinese_values(
     remaining: f64,
