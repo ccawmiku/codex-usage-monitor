@@ -21,8 +21,8 @@ use crate::diagnose;
 use crate::localization::{self, LanguageId, Strings};
 use crate::models::{AppUsageData, ColorMode, ColorTheme, TextFormat};
 use crate::native_interop::{
-    self, TIMER_COUNTDOWN, TIMER_POLL, TIMER_RESET_POLL, TIMER_UPDATE_CHECK, WM_APP_TRAY,
-    WM_APP_USAGE_UPDATED,
+    self, TIMER_COUNTDOWN, TIMER_POLL, TIMER_RESET_POLL, TIMER_UPDATE_CHECK, WM_APP_REPOSITION,
+    WM_APP_TRAY, WM_APP_USAGE_UPDATED,
 };
 use crate::poller;
 use crate::render::{
@@ -170,6 +170,7 @@ static SUPPRESS_TRAY_REPOSITION_UNTIL: Mutex<Option<Instant>> = Mutex::new(None)
 
 /// Current system DPI (96 = 100% scaling, 144 = 150%, 192 = 200%, etc.)
 static CURRENT_DPI: AtomicU32 = AtomicU32::new(96);
+static WM_TASKBAR_CREATED: AtomicU32 = AtomicU32::new(0);
 
 /// Scale a base pixel value (designed at 96 DPI) to the current DPI.
 fn sc(px: i32) -> i32 {
@@ -253,29 +254,50 @@ fn relaunch_self() {
 
 /// Detect explorer.exe restarts and recover from them.
 ///
-/// Once explorer destroys the taskbar, our embedded child window is destroyed
-/// and the UI message loop is dead, so recovery cannot happen in-process. This
-/// dedicated thread (independent of the dead message loop) polls the taskbar
-/// handle and, when it changes, relaunches the widget as a fresh process.
-fn spawn_taskbar_watchdog() {
+/// If the taskbar was not ready at initial startup (e.g. boot time), or if explorer
+/// restarts, this thread detects when a taskbar is available and either triggers an
+/// in-process re-attach via WM_APP_REPOSITION or relaunches the widget if the window
+/// was destroyed.
+fn spawn_taskbar_watchdog(hwnd: HWND) {
+    let send_hwnd = SendHwnd::from_hwnd(hwnd);
     std::thread::spawn(move || loop {
         std::thread::sleep(Duration::from_secs(TASKBAR_WATCH_INTERVAL_SECS));
         let stored = {
             let state = lock_state();
             state.as_ref().and_then(|s| s.taskbar_hwnd)
         };
-        // Only relevant once we have embedded into a taskbar at least once.
-        let Some(old) = stored else {
-            continue;
-        };
         let taskbars = native_interop::find_taskbars();
-        if !taskbars.is_empty() && !taskbars.iter().any(|taskbar| taskbar.hwnd == old) {
-            let new = taskbars[0].hwnd;
-            diagnose::log(format!(
-                "watchdog: taskbar changed old={:?} new={:?} -> relaunching",
-                old.0, new.0
-            ));
-            relaunch_self();
+        let my_hwnd = send_hwnd.to_hwnd();
+        let my_alive = unsafe { IsWindow(my_hwnd).as_bool() };
+
+        if let Some(old) = stored {
+            let old_alive = unsafe { IsWindow(old).as_bool() };
+            let still_in_list = taskbars.iter().any(|taskbar| taskbar.hwnd == old);
+            if !old_alive || (!taskbars.is_empty() && !still_in_list) {
+                diagnose::log(format!(
+                    "watchdog: taskbar invalid or changed old={:?} old_alive={old_alive} my_alive={my_alive}",
+                    old.0
+                ));
+                if my_alive {
+                    unsafe {
+                        let _ = PostMessageW(my_hwnd, WM_APP_REPOSITION, WPARAM(0), LPARAM(0));
+                    }
+                } else if !taskbars.is_empty() {
+                    relaunch_self();
+                }
+            }
+        } else {
+            // Taskbar was NOT present at startup (e.g. boot time before Explorer initialized).
+            if !taskbars.is_empty() {
+                diagnose::log("watchdog: taskbar now available after startup delay");
+                if my_alive {
+                    unsafe {
+                        let _ = PostMessageW(my_hwnd, WM_APP_REPOSITION, WPARAM(0), LPARAM(0));
+                    }
+                } else {
+                    relaunch_self();
+                }
+            }
         }
     });
 }
@@ -457,13 +479,15 @@ fn load_settings_from_paths(
     legacy_path: &std::path::Path,
 ) -> Option<(SettingsFile, bool)> {
     if let Ok(content) = std::fs::read_to_string(current_path) {
-        return serde_json::from_str(&content)
+        let content = content.trim_start_matches('\u{feff}');
+        return serde_json::from_str(content)
             .ok()
             .map(|settings| (settings, false));
     }
 
     let content = std::fs::read_to_string(legacy_path).ok()?;
-    serde_json::from_str(&content)
+    let content = content.trim_start_matches('\u{feff}');
+    serde_json::from_str(content)
         .ok()
         .map(|settings| (settings, true))
 }
@@ -477,6 +501,9 @@ fn normalize_settings(mut settings: SettingsFile) -> SettingsFile {
     }
     if !matches!(settings.alert_threshold_percent, 0 | 10 | 20 | 30) {
         settings.alert_threshold_percent = 0;
+    }
+    if settings.tray_offset < 0 || settings.tray_offset > 800 {
+        settings.tray_offset = 0;
     }
     settings.notified_quota_windows.sort();
     settings.notified_quota_windows.dedup();
@@ -788,6 +815,24 @@ fn toggle_widget_visibility(hwnd: HWND) {
     save_state_settings();
     unsafe {
         if new_visible {
+            let taskbar_index = {
+                let state = lock_state();
+                state.as_ref().map(|s| s.taskbar_index).unwrap_or(0)
+            };
+            let needs_attach = {
+                let state = lock_state();
+                state
+                    .as_ref()
+                    .map(|s| {
+                        s.taskbar_hwnd
+                            .map(|h| !IsWindow(h).as_bool())
+                            .unwrap_or(true)
+                    })
+                    .unwrap_or(true)
+            };
+            if needs_attach {
+                attach_to_taskbar(hwnd, taskbar_index);
+            }
             position_at_taskbar();
             let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
             render_layered();
@@ -878,7 +923,11 @@ fn tray_left_for_taskbar(taskbar_hwnd: HWND, taskbar_rect: RECT) -> i32 {
 
 fn clamp_offset_for_taskbar(taskbar_hwnd: HWND, taskbar_rect: RECT, offset: i32) -> i32 {
     let tray_left = tray_left_for_taskbar(taskbar_hwnd, taskbar_rect);
-    let max_offset = (tray_left - taskbar_rect.left - total_widget_width()).max(0);
+    let taskbar_width = taskbar_rect.right - taskbar_rect.left;
+    let min_safe_left = (taskbar_width / 4).max(300);
+    let max_offset = (tray_left - taskbar_rect.left - total_widget_width() - min_safe_left)
+        .max(0)
+        .min(500);
     offset.clamp(0, max_offset)
 }
 
@@ -1700,6 +1749,12 @@ pub fn run() {
             );
         }
 
+        // Register TaskbarCreated message to handle Explorer restart
+        let taskbar_created_str = native_interop::wide_str("TaskbarCreated");
+        let taskbar_created_msg =
+            RegisterWindowMessageW(PCWSTR::from_raw(taskbar_created_str.as_ptr()));
+        WM_TASKBAR_CREATED.store(taskbar_created_msg, Ordering::Relaxed);
+
         // Register system tray icon(s)
         sync_tray_icons(hwnd);
 
@@ -1724,11 +1779,8 @@ pub fn run() {
         SetTimer(hwnd, TIMER_POLL, initial_poll_ms, None);
 
         // Watch for explorer.exe restarts so we can re-embed and re-add the tray
-        // icon (the shell discards tray registrations when it restarts). This
-        // runs on a dedicated thread, NOT a window timer: once explorer destroys
-        // the taskbar, our embedded child window stops receiving all messages
-        // (WM_TIMER included), so a timer would never fire again.
-        spawn_taskbar_watchdog();
+        // icon (the shell discards tray registrations when it restarts).
+        spawn_taskbar_watchdog(hwnd);
 
         // Initial poll
         let send_hwnd = SendHwnd::from_hwnd(hwnd);
@@ -2618,7 +2670,7 @@ fn position_at_taskbar() {
     refresh_dpi();
     // Drop the app-state lock before any Win32 call that may synchronously
     // re-enter our window procedure.
-    let (hwnd, embedded, tray_offset, taskbar_hwnd) = {
+    let (hwnd, mut embedded, mut tray_offset, mut taskbar_hwnd, taskbar_index) = {
         let state = lock_state();
         let s = match state.as_ref() {
             Some(s) => s,
@@ -2630,26 +2682,58 @@ fn position_at_taskbar() {
             return;
         }
 
-        let taskbar_hwnd = match s.taskbar_hwnd {
-            Some(h) => h,
-            None => {
-                diagnose::log("position_at_taskbar skipped: no taskbar handle");
-                return;
-            }
-        };
+        (s.hwnd.to_hwnd(), s.embedded, s.tray_offset, s.taskbar_hwnd, s.taskbar_index)
+    };
 
-        (s.hwnd.to_hwnd(), s.embedded, s.tray_offset, taskbar_hwnd)
+    // If taskbar handle is missing or destroyed, try to attach now!
+    let taskbar_valid = taskbar_hwnd.map(|h| unsafe { IsWindow(h).as_bool() }).unwrap_or(false);
+    if !taskbar_valid {
+        if attach_to_taskbar(hwnd, taskbar_index) {
+            let state = lock_state();
+            if let Some(s) = state.as_ref() {
+                taskbar_hwnd = s.taskbar_hwnd;
+                embedded = s.embedded;
+                tray_offset = s.tray_offset;
+            }
+        }
+    }
+
+    let taskbar_hwnd = match taskbar_hwnd {
+        Some(h) => h,
+        None => {
+            diagnose::log("position_at_taskbar skipped: no taskbar handle");
+            return;
+        }
     };
 
     let taskbar_rect = match native_interop::get_taskbar_rect(taskbar_hwnd) {
         Some(r) => r,
         None => {
-            diagnose::log("position_at_taskbar skipped: unable to query taskbar rect");
-            return;
+            // Taskbar handle may be stale. Try to re-attach once.
+            if attach_to_taskbar(hwnd, taskbar_index) {
+                let new_h = {
+                    let state = lock_state();
+                    state.as_ref().and_then(|s| s.taskbar_hwnd)
+                };
+                if let Some(h) = new_h {
+                    if let Some(r) = native_interop::get_taskbar_rect(h) {
+                        r
+                    } else {
+                        diagnose::log("position_at_taskbar skipped: unable to query taskbar rect after re-attach");
+                        return;
+                    }
+                } else {
+                    return;
+                }
+            } else {
+                diagnose::log("position_at_taskbar skipped: unable to query taskbar rect");
+                return;
+            }
         }
     };
 
     let taskbar_height = taskbar_rect.bottom - taskbar_rect.top;
+    let taskbar_width = taskbar_rect.right - taskbar_rect.left;
     let mut tray_left = taskbar_rect.right;
     let anchor_top = taskbar_rect.top;
     let anchor_height = taskbar_height;
@@ -2661,8 +2745,20 @@ fn position_at_taskbar() {
     }
 
     let widget_width = total_widget_width();
-    let max_offset = (tray_left - taskbar_rect.left - widget_width).max(0);
-    let tray_offset = tray_offset.clamp(0, max_offset);
+    let min_safe_left = (taskbar_width / 4).max(300);
+    let max_possible = (tray_left - taskbar_rect.left - widget_width - min_safe_left).max(0);
+    let max_offset = max_possible.min(500);
+
+    let tray_offset = if tray_offset > max_offset {
+        if tray_offset > 800 {
+            0
+        } else {
+            max_offset
+        }
+    } else {
+        tray_offset.max(0)
+    };
+
     let offset_changed = {
         let mut state = lock_state();
         if let Some(s) = state.as_mut() {
@@ -2685,7 +2781,7 @@ fn position_at_taskbar() {
     if embedded {
         // Child window: coordinates relative to parent (taskbar)
         let x = tray_left - taskbar_rect.left - widget_width - tray_offset;
-        native_interop::move_window(hwnd, x, y - taskbar_rect.top, widget_width, widget_height);
+        native_interop::move_window(hwnd, x, y - taskbar_rect.top, widget_width, widget_height, true);
         diagnose::log(format!(
             "positioned embedded widget at x={x} y={} w={widget_width} h={widget_height}",
             y - taskbar_rect.top
@@ -2693,7 +2789,7 @@ fn position_at_taskbar() {
     } else {
         // Topmost popup: screen coordinates
         let x = tray_left - widget_width - tray_offset;
-        native_interop::move_window(hwnd, x, y, widget_width, widget_height);
+        native_interop::move_window(hwnd, x, y, widget_width, widget_height, false);
         diagnose::log(format!(
             "positioned fallback widget at x={x} y={y} w={widget_width} h={widget_height}"
         ));
@@ -2790,6 +2886,28 @@ unsafe extern "system" fn wnd_proc(
             refresh_dpi();
             position_at_taskbar();
             render_layered();
+            LRESULT(0)
+        }
+        _ if msg == native_interop::WM_APP_REPOSITION
+            || (WM_TASKBAR_CREATED.load(Ordering::Relaxed) != 0
+                && msg == WM_TASKBAR_CREATED.load(Ordering::Relaxed)) =>
+        {
+            diagnose::log("wnd_proc: taskbar reposition / created event received");
+            let taskbar_index = {
+                let state = lock_state();
+                state.as_ref().map(|s| s.taskbar_index).unwrap_or(0)
+            };
+            attach_to_taskbar(hwnd, taskbar_index);
+            position_at_taskbar();
+            let visible = {
+                let state = lock_state();
+                state.as_ref().map(|s| s.widget_visible).unwrap_or(true)
+            };
+            if visible {
+                let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+                render_layered();
+            }
+            sync_tray_icons(hwnd);
             LRESULT(0)
         }
         WM_TIMER => {
@@ -2954,7 +3072,11 @@ unsafe extern "system" fn wnd_proc(
                                 }
                             }
                             let widget_width = total_widget_width_for_state(s);
-                            let max_offset = (tray_left - taskbar_rect.left - widget_width).max(0);
+                            let taskbar_width = taskbar_rect.right - taskbar_rect.left;
+                            let min_safe_left = (taskbar_width / 4).max(300);
+                            let max_offset = (tray_left - taskbar_rect.left - widget_width - min_safe_left)
+                                .max(0)
+                                .min(500);
                             if new_offset > max_offset {
                                 new_offset = max_offset;
                             }
@@ -2981,11 +3103,11 @@ unsafe extern "system" fn wnd_proc(
                                 widget_height,
                             ))
                         } else {
-                            s.tray_offset = new_offset;
+                            s.tray_offset = new_offset.min(500);
                             None
                         }
                     } else {
-                        s.tray_offset = new_offset;
+                        s.tray_offset = new_offset.min(500);
                         None
                     }
                 };
@@ -3000,9 +3122,10 @@ unsafe extern "system" fn wnd_proc(
                             y - taskbar_top,
                             widget_width,
                             widget_height,
+                            true,
                         );
                     } else {
-                        native_interop::move_window(hwnd_val, x, y, widget_width, widget_height);
+                        native_interop::move_window(hwnd_val, x, y, widget_width, widget_height, false);
                     }
                 }
             }
@@ -3117,14 +3240,22 @@ unsafe extern "system" fn wnd_proc(
                     PostQuitMessage(0);
                 }
                 IDM_RESET_POSITION => {
-                    {
+                    let taskbar_index = {
                         let mut state = lock_state();
                         if let Some(s) = state.as_mut() {
                             s.tray_offset = 0;
+                            s.widget_visible = true;
+                            s.taskbar_index
+                        } else {
+                            0
                         }
-                    }
+                    };
                     save_state_settings();
+                    attach_to_taskbar(hwnd, taskbar_index);
                     position_at_taskbar();
+                    let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+                    render_layered();
+                    sync_tray_icons(hwnd);
                 }
                 IDM_START_WITH_WINDOWS => {
                     set_startup_enabled(!is_startup_enabled());
@@ -3167,7 +3298,15 @@ unsafe extern "system" fn wnd_proc(
                         }
                     }
                     save_state_settings();
-                    render_layered();
+                    position_at_taskbar();
+                    let visible = {
+                        let state = lock_state();
+                        state.as_ref().map(|s| s.widget_visible).unwrap_or(true)
+                    };
+                    if visible {
+                        let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+                        render_layered();
+                    }
                     sync_tray_icons(hwnd);
                 }
                 IDM_ALERT_OFF | IDM_ALERT_10 | IDM_ALERT_20 | IDM_ALERT_30 => {
@@ -3234,7 +3373,14 @@ unsafe extern "system" fn wnd_proc(
                     }
                     save_state_settings();
                     position_at_taskbar();
-                    render_layered();
+                    let visible = {
+                        let state = lock_state();
+                        state.as_ref().map(|s| s.widget_visible).unwrap_or(true)
+                    };
+                    if visible {
+                        let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+                        render_layered();
+                    }
                     sync_tray_icons(hwnd);
                     let sh = SendHwnd::from_hwnd(hwnd);
                     std::thread::spawn(move || {
@@ -3288,7 +3434,14 @@ unsafe extern "system" fn wnd_proc(
                         }
                     }
                     save_state_settings();
-                    render_layered();
+                    let visible = {
+                        let state = lock_state();
+                        state.as_ref().map(|s| s.widget_visible).unwrap_or(true)
+                    };
+                    if visible {
+                        let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+                        render_layered();
+                    }
                 }
                 id if id == tray_icon::IDM_TOGGLE_WIDGET => {
                     toggle_widget_visibility(hwnd);
@@ -4042,6 +4195,27 @@ mod tests {
         assert!(!settings.show_weekly_window);
         assert_eq!(settings.alert_threshold_percent, 0);
         assert_eq!(settings.notified_quota_windows.len(), 1);
+    }
+
+    #[test]
+    fn normalizes_tray_offset_resets_extreme_or_negative_values() {
+        let settings = normalize_settings(SettingsFile {
+            tray_offset: 1817,
+            ..SettingsFile::default()
+        });
+        assert_eq!(settings.tray_offset, 0);
+
+        let settings = normalize_settings(SettingsFile {
+            tray_offset: -50,
+            ..SettingsFile::default()
+        });
+        assert_eq!(settings.tray_offset, 0);
+
+        let settings = normalize_settings(SettingsFile {
+            tray_offset: 350,
+            ..SettingsFile::default()
+        });
+        assert_eq!(settings.tray_offset, 350);
     }
 
     #[test]

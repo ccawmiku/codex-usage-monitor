@@ -26,6 +26,7 @@ pub const TIMER_UPDATE_CHECK: usize = 4;
 pub const WM_APP: u32 = 0x8000;
 pub const WM_APP_USAGE_UPDATED: u32 = WM_APP + 1;
 pub const WM_APP_TRAY: u32 = WM_APP + 3;
+pub const WM_APP_REPOSITION: u32 = WM_APP + 4;
 
 const WINDOWS_TO_UNIX_EPOCH_SECONDS: u64 = 11_644_473_600;
 
@@ -161,13 +162,31 @@ pub fn embed_in_taskbar(hwnd: HWND, taskbar_hwnd: HWND) {
         let _ = SetWindowLongW(hwnd, GWL_STYLE, new_style as i32);
 
         let _ = SetParent(hwnd, taskbar_hwnd);
+        let _ = SetWindowPos(
+            hwnd,
+            HWND_TOP,
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+        );
     }
 }
 
-/// Move the window
-pub fn move_window(hwnd: HWND, x: i32, y: i32, w: i32, h: i32) {
+/// Move and position the window ensuring proper Z-order and visibility
+pub fn move_window(hwnd: HWND, x: i32, y: i32, w: i32, h: i32, embedded: bool) {
     unsafe {
-        let _ = MoveWindow(hwnd, x, y, w, h, true);
+        let insert_after = if embedded { HWND_TOP } else { HWND_TOPMOST };
+        let _ = SetWindowPos(
+            hwnd,
+            insert_after,
+            x,
+            y,
+            w,
+            h,
+            SWP_NOACTIVATE | SWP_SHOWWINDOW,
+        );
     }
 }
 
@@ -217,6 +236,7 @@ pub fn colorref(r: u8, g: u8, b: u8) -> u32 {
 }
 
 /// Color helper
+#[allow(dead_code)]
 #[derive(Clone, Copy, Debug)]
 pub struct Color {
     pub r: u8,
@@ -224,8 +244,8 @@ pub struct Color {
     pub b: u8,
 }
 
+#[allow(dead_code)]
 impl Color {
-    #[allow(dead_code)]
     pub const fn new(r: u8, g: u8, b: u8) -> Self {
         Self { r, g, b }
     }
