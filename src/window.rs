@@ -1600,6 +1600,8 @@ pub fn run() {
 
     migrate_legacy_startup_entry();
 
+    native_interop::ensure_default_desktop();
+
     let class_name = native_interop::wide_str("CodexUsage");
 
     unsafe {

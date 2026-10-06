@@ -2,10 +2,35 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use windows::core::PCWSTR;
 use windows::Win32::Foundation::{BOOL, FILETIME, HWND, LPARAM, RECT, SYSTEMTIME};
+use windows::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress};
 use windows::Win32::System::Time::{FileTimeToSystemTime, SystemTimeToTzSpecificLocalTime};
 use windows::Win32::UI::Accessibility::{SetWinEventHook, UnhookWinEvent, HWINEVENTHOOK};
 use windows::Win32::UI::Shell::{SHAppBarMessage, ABM_GETTASKBARPOS, APPBARDATA};
 use windows::Win32::UI::WindowsAndMessaging::*;
+
+/// Attach thread to the user's interactive "Default" desktop if available
+pub fn ensure_default_desktop() {
+    unsafe {
+        type OpenDesktopWFn = unsafe extern "system" fn(PCWSTR, u32, BOOL, u32) -> isize;
+        type SetThreadDesktopFn = unsafe extern "system" fn(isize) -> BOOL;
+
+        let user32 = GetModuleHandleW(windows::core::w!("user32.dll"));
+        if let Ok(user32) = user32 {
+            let open_desktop_sym = GetProcAddress(user32, windows::core::s!("OpenDesktopW"));
+            let set_desktop_sym = GetProcAddress(user32, windows::core::s!("SetThreadDesktop"));
+            if let (Some(open_desktop), Some(set_desktop)) = (open_desktop_sym, set_desktop_sym) {
+                let open_fn: OpenDesktopWFn = std::mem::transmute(open_desktop);
+                let set_fn: SetThreadDesktopFn = std::mem::transmute(set_desktop);
+                let desk_name = wide_str("Default");
+                let h = open_fn(PCWSTR::from_raw(desk_name.as_ptr()), 0, BOOL(0), 0x01FF);
+                if h != 0 {
+                    let ok = set_fn(h);
+                    crate::diagnose::log(format!("ensure_default_desktop: SetThreadDesktop returned {:?}", ok.as_bool()));
+                }
+            }
+        }
+    }
+}
 
 // Window style constants
 pub const WS_POPUP_STYLE: u32 = 0x80000000;
